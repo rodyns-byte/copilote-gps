@@ -12,7 +12,12 @@ Application React Native (Expo SDK 58) qui reprend les 5 fonctions du prototype 
 | Voiture électrique : batterie à l'arrivée, alerte sous 10 %, lecture de la batterie via Smartcar | `src/lib/vehicle.ts`, réglages « Voiture électrique » |
 | Radars affichés en zones de contravention (cercle de 500 m, jamais l'emplacement exact) | `src/components/AlertSheet.tsx`, `App.tsx` |
 
-## Lancer sur votre téléphone
+## APK de test
+
+`copilote-gps-test.apk` (Android 7 ou plus récent) s'installe directement : copiez-le sur le téléphone, ouvrez-le et
+autorisez « installer des applications inconnues ». Il est signé avec une clé de test : il ne peut pas aller sur le Play Store.
+
+## Lancer sur votre téléphone (développement)
 
 La carte MapLibre contient du code natif : l'application **ne marche pas dans Expo Go**. Il faut une
 « development build », que le service EAS d'Expo compile en ligne (pas besoin d'Android Studio ni de Xcode).
@@ -37,7 +42,8 @@ Une fois l'application ouverte :
 
 - Vérifié : le code TypeScript compile sans erreur, et l'application se construit pour Android (`npx expo export`).
   L'analyse des phrases, les instructions de guidage, le classement des itinéraires et la prédiction ont été testés sur des exemples.
-- Pas encore vérifié : l'application n'a pas tourné sur un vrai téléphone, et aucun appel réel aux services de carte n'a été fait.
+- Vérifié aussi : un vrai calcul Paris-Lyon (avec et sans péage) et une vraie recherche d'adresse ont marché.
+- Pas encore vérifié : l'application n'a pas tourné sur un vrai téléphone.
 
 ## Batterie de la voiture
 
@@ -53,7 +59,7 @@ L'estimation à l'arrivée tient compte de la vitesse sur chaque portion (ville,
 ## Limites connues (prochaines étapes)
 
 - Le guidage s'arrête quand l'écran est verrouillé : le GPS en arrière-plan est à ajouter (`expo-task-manager`).
-- Les serveurs publics OSRM et Nominatim servent aux essais seulement (`src/lib/config.ts`). Pour publier l'app, il faut vos propres serveurs ou un fournisseur payant.
+- Les serveurs publics Valhalla (FOSSGIS) et Nominatim servent aux essais seulement (`src/lib/config.ts`). Pour publier l'app, il faut vos propres serveurs ou un fournisseur payant.
 - Sans réseau, seules la carte téléchargée et la position marchent. L'itinéraire hors ligne demandera Valhalla embarqué.
 - Les signalements restent sur le téléphone tant qu'il n'y a pas de serveur pour les partager.
 - La clé Claude saisie dans l'app est pour les essais. En production, elle reste sur votre serveur.

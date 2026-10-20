@@ -3,9 +3,10 @@ import { distToLine, type LngLat } from './geo';
 import type { RoadAlert, Trip } from './storage';
 
 export type Step = {
-  distance: number;
-  duration: number;
+  distance: number; // m
+  duration: number; // s
   name: string;
+  text: string; // consigne complète en français, fournie par Valhalla
   maneuver: { type: string; modifier?: string; exit?: number; location: LngLat };
 };
 export type Route = {
@@ -13,24 +14,75 @@ export type Route = {
   duration: number;
   geometry: { type: 'LineString'; coordinates: LngLat[] };
   legs: { summary: string; steps: Step[] }[];
+  hasToll: boolean;
   // ajoutés par rankRoutes
   eta: number;
   hazards: RoadAlert[];
 };
 export type Avoid = { toll: boolean; motorway: boolean };
 
-export async function fetchRoutes(from: LngLat, to: LngLat, avoid: Avoid): Promise<{ routes: Route[]; avoidIgnored: boolean }> {
-  const exclude = [avoid.toll && 'toll', avoid.motorway && 'motorway'].filter(Boolean).join(',');
-  const base = `${CONFIG.osrmUrl}${from.join(',')};${to.join(',')}?alternatives=3&steps=true&overview=full&geometries=geojson`;
-  let res = await fetch(base + (exclude ? '&exclude=' + exclude : ''));
-  let avoidIgnored = false;
-  if (!res.ok && exclude) {
-    avoidIgnored = true; // le serveur ne sait pas exclure ces routes
-    res = await fetch(base);
+/** Décode une polyligne Valhalla (précision 6) en [lon, lat]. */
+export function decodePolyline6(str: string): LngLat[] {
+  const out: LngLat[] = [];
+  let i = 0, lat = 0, lon = 0;
+  const next = () => {
+    let result = 0, shift = 0, b: number;
+    do { b = str.charCodeAt(i++) - 63; result |= (b & 0x1f) << shift; shift += 5; } while (b >= 0x20);
+    return result & 1 ? ~(result >> 1) : result >> 1;
+  };
+  while (i < str.length) { lat += next(); lon += next(); out.push([lon / 1e6, lat / 1e6]); }
+  return out;
+}
+
+// Types de manœuvre Valhalla -> type et direction utilisés par l'affichage.
+const MANEUVER: Record<number, [string, string?]> = {
+  1: ['depart'], 2: ['depart', 'right'], 3: ['depart', 'left'], 4: ['arrive'], 5: ['arrive', 'right'], 6: ['arrive', 'left'],
+  7: ['continue', 'straight'], 8: ['continue', 'straight'], 9: ['turn', 'slight right'], 10: ['turn', 'right'], 11: ['turn', 'sharp right'],
+  12: ['turn', 'uturn'], 13: ['turn', 'uturn'], 14: ['turn', 'sharp left'], 15: ['turn', 'left'], 16: ['turn', 'slight left'],
+  17: ['on ramp', 'straight'], 18: ['on ramp', 'right'], 19: ['on ramp', 'left'], 20: ['off ramp', 'right'], 21: ['off ramp', 'left'],
+  22: ['fork', 'straight'], 23: ['fork', 'right'], 24: ['fork', 'left'], 25: ['merge'], 26: ['roundabout'], 27: ['exit roundabout'],
+};
+
+type VManeuver = { type: number; instruction: string; verbal_pre_transition_instruction?: string; street_names?: string[];
+  time: number; length: number; begin_shape_index: number; roundabout_exit_count?: number };
+type VTrip = { summary: { time: number; length: number; has_toll: boolean }; legs: { shape: string; maneuvers: VManeuver[] }[] };
+
+function toRoute(trip: VTrip): Route {
+  const coords = trip.legs.flatMap((l) => decodePolyline6(l.shape));
+  const steps: Step[] = [];
+  for (const leg of trip.legs) {
+    const shape = decodePolyline6(leg.shape);
+    for (const m of leg.maneuvers) {
+      const [type, modifier] = MANEUVER[m.type] ?? ['continue'];
+      steps.push({
+        distance: m.length * 1000, duration: m.time, name: m.street_names?.[0] ?? '',
+        text: (m.verbal_pre_transition_instruction || m.instruction).replace(/\.$/, ''),
+        maneuver: { type, modifier, exit: m.roundabout_exit_count, location: shape[m.begin_shape_index] ?? coords[0] },
+      });
+    }
   }
+  const names = [...new Set(steps.filter((s) => s.name && s.distance > 5000).sort((a, b) => b.distance - a.distance).map((s) => s.name))].slice(0, 2);
+  return {
+    distance: trip.summary.length * 1000, duration: trip.summary.time, hasToll: trip.summary.has_toll,
+    geometry: { type: 'LineString', coordinates: coords }, legs: [{ summary: names.join(', '), steps }], eta: trip.summary.time, hazards: [],
+  };
+}
+
+export async function fetchRoutes(from: LngLat, to: LngLat, avoid: Avoid): Promise<{ routes: Route[]; avoidIgnored: boolean }> {
+  const body = {
+    locations: [{ lon: from[0], lat: from[1] }, { lon: to[0], lat: to[1] }],
+    costing: 'auto',
+    costing_options: { auto: { use_tolls: avoid.toll ? 0 : 0.5, use_highways: avoid.motorway ? 0 : 1 } },
+    alternates: 2,
+    units: 'kilometers',
+    language: 'fr-FR',
+  };
+  const res = await fetch(CONFIG.valhallaUrl, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
   const data = await res.json();
-  if (data.code !== 'Ok') throw new Error('Aucun itinéraire trouvé');
-  return { routes: data.routes.map((r: Route) => ({ ...r, eta: r.duration, hazards: [] })), avoidIgnored };
+  if (!res.ok || !data.trip) throw new Error(data.error ? `Aucun itinéraire trouvé (${data.error})` : 'Aucun itinéraire trouvé');
+  const routes = [data.trip, ...(data.alternates ?? []).map((a: { trip: VTrip }) => a.trip)].map(toRoute);
+  // « Éviter » est une préférence : s'il n'existe aucun trajet sans péage, Valhalla en garde un.
+  return { routes, avoidIgnored: avoid.toll && routes.every((r) => r.hasToll) };
 }
 
 /** Écart habituel entre la durée réelle et la durée prévue (médiane des 20 derniers trajets). */
@@ -53,30 +105,13 @@ export function rankRoutes(routes: Route[], alerts: RoadAlert[], factor: number)
   return best;
 }
 
-const DIR: Record<string, string> = {
-  left: 'à gauche', right: 'à droite', 'sharp left': 'franchement à gauche', 'sharp right': 'franchement à droite',
-  'slight left': 'légèrement à gauche', 'slight right': 'légèrement à droite', straight: 'tout droit', uturn: 'demi-tour',
-};
 export const ARROW: Record<string, string> = {
   left: '←', right: '→', 'sharp left': '↰', 'sharp right': '↱', 'slight left': '↖', 'slight right': '↗', straight: '↑', uturn: '↶',
 };
 
 export function instruction(step: Step): string {
-  const m = step.maneuver;
-  const dir = (m.modifier && DIR[m.modifier]) || '';
-  const road = step.name ? ` sur ${step.name}` : '';
-  switch (m.type) {
-    case 'depart': return `Partez${road}`;
-    case 'arrive': return 'Vous êtes arrivé à destination';
-    case 'roundabout':
-    case 'rotary': return `Au rond-point, prenez la ${m.exit || 1}${(m.exit || 1) === 1 ? 're' : 'e'} sortie${road}`;
-    case 'merge': return `Insérez-vous${road}`;
-    case 'on ramp': return `Prenez la bretelle ${dir}${road}`;
-    case 'off ramp': return `Prenez la sortie ${dir}${road}`;
-    case 'fork': return `À l'embranchement, restez ${dir}${road}`;
-    case 'end of road': return `Au bout de la route, tournez ${dir}${road}`;
-    case 'continue':
-    case 'new name': return m.modifier === 'straight' || !m.modifier ? `Continuez${road}` : `Continuez ${dir}${road}`;
-    default: return m.modifier === 'uturn' ? 'Faites demi-tour' : `Tournez ${dir}${road}`;
-  }
+  return step.text;
 }
+
+/** Consigne en milieu de phrase (« Dans 300 m, tournez… ») sans abîmer les noms de rue. */
+export const lower = (t: string) => t.charAt(0).toLowerCase() + t.slice(1);

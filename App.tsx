@@ -8,7 +8,7 @@ import { Camera, type CameraRef, GeoJSONSource, Layer, Map, Marker, NativeUserLo
 import { CONFIG } from './src/lib/config';
 import { bbox, blur, circle, dist, distToLine, fmtDist, fmtDur, fmtTime } from './src/lib/geo';
 import { parseLocal, parseWithClaude, type Command } from './src/lib/nlu';
-import { ARROW, type Avoid, fetchRoutes, instruction, personalFactor, rankRoutes, type Route, type Step } from './src/lib/routing';
+import { ARROW, type Avoid, lower, fetchRoutes, instruction, personalFactor, rankRoutes, type Route, type Step } from './src/lib/routing';
 import { fetchIncidents, geocode, predictDestinations } from './src/lib/services';
 import { type AlertType, type Place, type RoadAlert, type Settings, store, type Trip } from './src/lib/storage';
 import { type Fix, useLocation } from './src/hooks/useLocation';
@@ -130,7 +130,7 @@ function GpsScreen() {
       const k = `${n.stepIdx}:${th}`;
       if (d < th && !n.announced.has(k) && (th !== 800 || f.speed > 15)) {
         n.announced.add(k);
-        say(th === 60 ? instruction(step) : `Dans ${fmtDist(d)}, ${instruction(step).toLowerCase()}`);
+        say(th === 60 ? instruction(step) : `Dans ${fmtDist(d)}, ${lower(instruction(step))}`);
         break;
       }
     }
@@ -214,7 +214,7 @@ function GpsScreen() {
     setBusy(true);
     try {
       const { routes: rs, avoidIgnored } = await fetchRoutes(f.coord, target.coord, av);
-      if (avoidIgnored) showToast('Le serveur ne sait pas éviter ces routes : itinéraire standard.');
+      if (avoidIgnored) showToast('Aucun trajet sans péage trouvé : cet itinéraire en contient.');
       const best = rankRoutes(rs, alertsRef.current, personalFactor(trips));
       setRoutes(rs);
       setSel(best);
@@ -238,7 +238,7 @@ function GpsScreen() {
     setRoutes([route]); setSel(0); setIs3d(true); is3dRef.current = true;
     activateKeepAwakeAsync().catch(() => {});
     refreshBattery();
-    say(instruction(steps[0]) + (steps[1] ? '. Puis ' + instruction(steps[1]).toLowerCase() : ''));
+    say(instruction(steps[0]) + (steps[1] ? '. Puis ' + lower(instruction(steps[1])) : ''));
     if (fixRef.current) navTick(fixRef.current);
   }
 
