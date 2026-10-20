@@ -4,6 +4,7 @@ import type { Step } from './routing';
 export type Vehicle = {
   capacityKwh: number; // capacité utile de la batterie
   consumption: number; // consommation moyenne en kWh/100 km (vitesse mixte)
+  maxChargeKw?: number; // puissance de recharge maximale acceptée par la voiture
   batteryPct: number; // dernier niveau connu
   updatedAt: number;
   source: 'manuel' | 'voiture';

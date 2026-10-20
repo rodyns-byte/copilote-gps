@@ -42,7 +42,18 @@
           "microphonePermission": "Copilote GPS utilise le micro pour comprendre vos demandes vocales.",
           "speechRecognitionPermission": "Copilote GPS transcrit vos demandes vocales pour préparer l'itinéraire."
         }
-      ]
+      ],
+      [
+        "expo-font",
+        {
+          "ios": {
+            "fonts": [
+              "./assets/fonts/material_icons.ttf"
+            ]
+          }
+        }
+      ],
+      "./plugins/withCarSupport"
     ],
     "scheme": "copilotegps"
   }

@@ -7,6 +7,7 @@ export type Step = {
   duration: number; // s
   name: string;
   text: string; // consigne complète en français, fournie par Valhalla
+  shapeIndex: number; // index du début de l'étape dans route.geometry.coordinates
   maneuver: { type: string; modifier?: string; exit?: number; location: LngLat };
 };
 export type Route = {
@@ -49,31 +50,38 @@ type VTrip = { summary: { time: number; length: number; has_toll: boolean }; leg
 
 function toRoute(trip: VTrip): Route {
   const coords = trip.legs.flatMap((l) => decodePolyline6(l.shape));
-  const steps: Step[] = [];
-  for (const leg of trip.legs) {
+  const legs: { summary: string; steps: Step[] }[] = [];
+  let offset = 0;
+  trip.legs.forEach((leg, li) => {
     const shape = decodePolyline6(leg.shape);
+    const steps: Step[] = [];
     for (const m of leg.maneuvers) {
-      const [type, modifier] = MANEUVER[m.type] ?? ['continue'];
+      let [type, modifier] = MANEUVER[m.type] ?? ['continue'];
+      if (type === 'arrive' && li < trip.legs.length - 1) type = 'waypoint'; // arrivée à une étape (borne), pas à la destination
       steps.push({
-        distance: m.length * 1000, duration: m.time, name: m.street_names?.[0] ?? '',
+        distance: m.length * 1000, duration: m.time, name: m.street_names?.[0] ?? '', shapeIndex: offset + m.begin_shape_index,
         text: (m.verbal_pre_transition_instruction || m.instruction).replace(/\.$/, ''),
         maneuver: { type, modifier, exit: m.roundabout_exit_count, location: shape[m.begin_shape_index] ?? coords[0] },
       });
     }
-  }
+    legs.push({ summary: '', steps });
+    offset += shape.length;
+  });
+  const steps = legs.flatMap((l) => l.steps);
   const names = [...new Set(steps.filter((s) => s.name && s.distance > 5000).sort((a, b) => b.distance - a.distance).map((s) => s.name))].slice(0, 2);
   return {
     distance: trip.summary.length * 1000, duration: trip.summary.time, hasToll: trip.summary.has_toll,
-    geometry: { type: 'LineString', coordinates: coords }, legs: [{ summary: names.join(', '), steps }], eta: trip.summary.time, hazards: [],
+    geometry: { type: 'LineString', coordinates: coords }, legs: legs.map((l, i) => ({ ...l, summary: i === 0 ? names.join(', ') : '' })), eta: trip.summary.time, hazards: [],
   };
 }
 
-export async function fetchRoutes(from: LngLat, to: LngLat, avoid: Avoid): Promise<{ routes: Route[]; avoidIgnored: boolean }> {
+/** Itinéraire passant par une suite de points (départ, étapes éventuelles, arrivée). */
+export async function fetchRoutes(points: LngLat[], avoid: Avoid): Promise<{ routes: Route[]; avoidIgnored: boolean }> {
   const body = {
-    locations: [{ lon: from[0], lat: from[1] }, { lon: to[0], lat: to[1] }],
+    locations: points.map(([lon, lat]) => ({ lon, lat, type: 'break' })),
     costing: 'auto',
     costing_options: { auto: { use_tolls: avoid.toll ? 0 : 0.5, use_highways: avoid.motorway ? 0 : 1 } },
-    alternates: 2,
+    alternates: points.length === 2 ? 2 : 0,
     units: 'kilometers',
     language: 'fr-FR',
   };
