@@ -1,11 +1,12 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import type { LngLat } from './geo';
+import type { Vehicle } from './vehicle';
 
 export type Place = { name: string; label: string; coord: LngLat };
 export type Trip = { name: string; coord: LngLat; at: number; hour: number; dow: number; predicted?: number; actual?: number };
 export type AlertType = 'accident' | 'bouchon' | 'travaux' | 'police' | 'danger' | 'ferme';
 export type RoadAlert = { id: string; type: AlertType; coord: LngLat; at: number; source: string; desc?: string };
-export type Settings = { home: Place | null; work: Place | null; claudeKey: string; tomtomKey: string };
+export type Settings = { home: Place | null; work: Place | null; claudeKey: string; tomtomKey: string; vehicle: Vehicle | null };
 
 const KEY = 'copilote.';
 
@@ -22,7 +23,7 @@ async function set<T>(k: string, v: T): Promise<void> {
 }
 
 export const store = {
-  getSettings: () => get<Settings>('settings', { home: null, work: null, claudeKey: '', tomtomKey: '' }),
+  getSettings: () => get<Settings>('settings', { home: null, work: null, claudeKey: '', tomtomKey: '', vehicle: null }).then((s) => ({ ...s, vehicle: s.vehicle ?? null })),
   setSettings: (s: Settings) => set('settings', s),
   getTrips: () => get<Trip[]>('trips', []),
   addTrip: async (t: Trip) => set('trips', [...(await get<Trip[]>('trips', [])), t].slice(-200)),

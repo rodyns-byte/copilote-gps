@@ -40,6 +40,24 @@ export function bbox(line: LngLat[]): [number, number, number, number] {
   return [w, s, e, n];
 }
 
+/** Polygone circulaire (rayon en mètres) pour dessiner une zone. */
+export function circle(center: LngLat, radius: number, points = 48): LngLat[] {
+  const out: LngLat[] = [];
+  const kx = (Math.cos(rad(center[1])) * R * Math.PI) / 180, ky = (R * Math.PI) / 180;
+  for (let i = 0; i <= points; i++) {
+    const a = (i / points) * 2 * Math.PI;
+    out.push([center[0] + (radius * Math.cos(a)) / kx, center[1] + (radius * Math.sin(a)) / ky]);
+  }
+  return out;
+}
+
+/** Décale un point au hasard (jusqu'à maxMeters) pour ne pas révéler un emplacement exact. */
+export function blur(p: LngLat, maxMeters: number): LngLat {
+  const d = Math.random() * maxMeters, a = Math.random() * 2 * Math.PI;
+  const kx = (Math.cos(rad(p[1])) * R * Math.PI) / 180, ky = (R * Math.PI) / 180;
+  return [p[0] + (d * Math.cos(a)) / kx, p[1] + (d * Math.sin(a)) / ky];
+}
+
 export const fmtDist = (m: number) =>
   m >= 1000 ? (m / 1000).toFixed(m >= 10000 ? 0 : 1).replace('.', ',') + ' km' : Math.round(m / 10) * 10 + ' m';
 

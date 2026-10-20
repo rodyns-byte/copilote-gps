@@ -3,9 +3,12 @@ import type { AlertType } from '../lib/storage';
 import { C } from './theme';
 
 export const ALERT_LABEL: Record<AlertType, string> = {
-  accident: 'Accident', bouchon: 'Bouchon', travaux: 'Travaux', police: 'Contrôle', danger: 'Danger', ferme: 'Route fermée',
+  accident: 'Accident', bouchon: 'Bouchon', travaux: 'Travaux', police: 'Zone de contravention', danger: 'Danger', ferme: 'Route fermée',
 };
-export const ALERT_ICON: Record<AlertType, string> = { accident: '💥', bouchon: '🚗', travaux: '🚧', police: '👮', danger: '⚠️', ferme: '⛔' };
+// Les radars ne sont jamais montrés à leur emplacement exact : on signale une zone (obligatoire en France).
+export const CONTRAVENTION_ZONE_M = 500;
+
+export const ALERT_ICON: Record<AlertType, string> = { accident: '💥', bouchon: '🚗', travaux: '🚧', police: '🔶', danger: '⚠️', ferme: '⛔' };
 
 export function AlertSheet({ visible, onPick, onClose }: { visible: boolean; onPick: (t: AlertType) => void; onClose: () => void }) {
   return (

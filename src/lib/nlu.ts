@@ -18,7 +18,7 @@ export const strip = (s: string) =>
 
 const REPORTS: [RegExp, AlertType][] = [
   [/accident/, 'accident'], [/bouchon|embouteillage|ralenti/, 'bouchon'], [/travaux|chantier/, 'travaux'],
-  [/police|controle|radar/, 'police'], [/route (est )?fermee|barree/, 'ferme'], [/danger|obstacle|objet sur la route/, 'danger'],
+  [/police|controle|radar|contravention/, 'police'], [/route (est )?fermee|barree/, 'ferme'], [/danger|obstacle|objet sur la route/, 'danger'],
 ];
 
 export function parseLocal(text: string): Command {

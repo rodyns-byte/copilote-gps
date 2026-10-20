@@ -6,20 +6,21 @@ import { activateKeepAwakeAsync, deactivateKeepAwake } from 'expo-keep-awake';
 import { Camera, type CameraRef, GeoJSONSource, Layer, Map, Marker, NativeUserLocation, RasterSource } from '@maplibre/maplibre-react-native';
 
 import { CONFIG } from './src/lib/config';
-import { bbox, dist, distToLine, fmtDist, fmtDur, fmtTime, type LngLat } from './src/lib/geo';
+import { bbox, blur, circle, dist, distToLine, fmtDist, fmtDur, fmtTime } from './src/lib/geo';
 import { parseLocal, parseWithClaude, type Command } from './src/lib/nlu';
 import { ARROW, type Avoid, fetchRoutes, instruction, personalFactor, rankRoutes, type Route, type Step } from './src/lib/routing';
 import { fetchIncidents, geocode, predictDestinations } from './src/lib/services';
 import { type AlertType, type Place, type RoadAlert, type Settings, store, type Trip } from './src/lib/storage';
 import { type Fix, useLocation } from './src/hooks/useLocation';
 import { useVoice } from './src/hooks/useVoice';
-import { AlertSheet, ALERT_ICON, ALERT_LABEL } from './src/components/AlertSheet';
+import { arrivalPct, LOW_BATTERY_PCT, readCarBattery } from './src/lib/vehicle';
+import { AlertSheet, ALERT_ICON, ALERT_LABEL, CONTRAVENTION_ZONE_M } from './src/components/AlertSheet';
 import { SettingsSheet } from './src/components/SettingsSheet';
 import { C } from './src/components/theme';
 
 type Nav = {
   route: Route; steps: Step[]; stepIdx: number; startedAt: number; predicted: number;
-  announced: Set<string>; alerted: Set<string>; offCount: number; rerouting: boolean;
+  announced: Set<string>; alerted: Set<string>; offCount: number; rerouting: boolean; lowBatteryWarned: boolean;
 };
 
 export default function App() {
@@ -35,7 +36,7 @@ function GpsScreen() {
   const insets = useSafeAreaInsets();
   const camera = useRef<CameraRef>(null);
 
-  const [settings, setSettings] = useState<Settings>({ home: null, work: null, claudeKey: '', tomtomKey: '' });
+  const [settings, setSettings] = useState<Settings>({ home: null, work: null, claudeKey: '', tomtomKey: '', vehicle: null });
   const [trips, setTrips] = useState<Trip[]>([]);
   const [userAlerts, setUserAlerts] = useState<RoadAlert[]>([]);
   const [incidents, setIncidents] = useState<RoadAlert[]>([]);
@@ -80,6 +81,25 @@ function GpsScreen() {
     return () => { clearTimeout(t); clearInterval(i); };
   }, [settings.tomtomKey, bounds?.join()]);
 
+  // ---------- batterie de la voiture (lue toutes les 5 min pendant la navigation si la voiture est connectée) ----------
+  const vehicle = settings.vehicle;
+  async function refreshBattery(silent = true) {
+    const v = settingsRef.current.vehicle;
+    if (!v?.smartcarToken) return;
+    try {
+      const pct = await readCarBattery(v);
+      const s = { ...settingsRef.current, vehicle: { ...v, batteryPct: pct, updatedAt: Date.now(), source: 'voiture' as const } };
+      setSettings(s); store.setSettings(s);
+    } catch (e) { if (!silent) showToast((e as Error).message); }
+  }
+  const settingsRef = useRef(settings);
+  settingsRef.current = settings;
+  useEffect(() => {
+    if (!nav || !vehicle?.smartcarToken) return;
+    const i = setInterval(refreshBattery, 5 * 60e3);
+    return () => clearInterval(i);
+  }, [!!nav, vehicle?.smartcarToken]);
+
   // ---------- voix ----------
   const voice = useVoice((text) => { setQuery(text); handleCommand(text); });
   const say = voice.say;
@@ -118,13 +138,23 @@ function GpsScreen() {
     // 3) dangers devant nous
     for (const a of alertsRef.current) {
       const ad = dist(f.coord, a.coord);
-      if (ad < CONFIG.alertAheadMeters && !n.alerted.has(a.id) && distToLine(a.coord, line).i >= near.i && distToLine(a.coord, line).d < 80) {
+      const zone = a.type === 'police';
+      const reach = zone ? CONTRAVENTION_ZONE_M + 200 : CONFIG.alertAheadMeters;
+      if (ad < reach && !n.alerted.has(a.id) && distToLine(a.coord, line).i >= near.i && distToLine(a.coord, line).d < (zone ? CONTRAVENTION_ZONE_M : 80)) {
         n.alerted.add(a.id);
-        showToast(`${ALERT_LABEL[a.type]} à ${fmtDist(ad)}`);
-        say(`Attention, ${ALERT_LABEL[a.type].toLowerCase()} signalé à ${fmtDist(ad)}`);
+        // Zone de contravention : on annonce la zone, jamais la distance exacte d'un radar.
+        const msg = zone ? 'Vous entrez dans une zone de contravention' : `${ALERT_LABEL[a.type]} à ${fmtDist(ad)}`;
+        showToast(msg);
+        say(zone ? msg + ', respectez les limitations' : `Attention, ${ALERT_LABEL[a.type].toLowerCase()} signalé à ${fmtDist(ad)}`);
       }
     }
-    // 4) la caméra suit
+    // 4) batterie à l'arrivée trop basse ?
+    const v = settingsRef.current.vehicle;
+    if (v && !n.lowBatteryWarned && arrivalPct(n.steps.slice(n.stepIdx), v) < LOW_BATTERY_PCT) {
+      n.lowBatteryWarned = true;
+      say(`Attention, il vous restera moins de ${LOW_BATTERY_PCT} pour cent de batterie à l'arrivée. Prévoyez une recharge.`);
+    }
+    // 5) la caméra suit
     camera.current?.easeTo({ center: f.coord, bearing: is3dRef.current ? f.heading : 0, pitch: is3dRef.current ? 60 : 0,
       zoom: f.speed > 25 ? 15 : 17, duration: 900, padding: { top: 0, left: 0, right: 0, bottom: 200 } });
     force((x) => x + 1);
@@ -203,10 +233,11 @@ function GpsScreen() {
     const route = routes[sel];
     const steps = route.legs.flatMap((l) => l.steps);
     const n: Nav = { route, steps, stepIdx: Math.min(1, steps.length - 1), startedAt: Date.now(), predicted: route.duration,
-      announced: new Set(), alerted: new Set(), offCount: 0, rerouting: false };
+      announced: new Set(), alerted: new Set(), offCount: 0, rerouting: false, lowBatteryWarned: false };
     setNav(n); navRef.current = n;
     setRoutes([route]); setSel(0); setIs3d(true); is3dRef.current = true;
     activateKeepAwakeAsync().catch(() => {});
+    refreshBattery();
     say(instruction(steps[0]) + (steps[1] ? '. Puis ' + instruction(steps[1]).toLowerCase() : ''));
     if (fixRef.current) navTick(fixRef.current);
   }
@@ -247,7 +278,8 @@ function GpsScreen() {
     const f = fixRef.current;
     setSheet(null);
     if (!f) return showToast('Position inconnue : signalement impossible.');
-    const next = [...userAlerts, { id: 'u' + Date.now(), type, coord: f.coord, at: Date.now(), source: 'vous' }];
+    const coord = type === 'police' ? blur(f.coord, CONTRAVENTION_ZONE_M / 2) : f.coord; // zone, pas d'emplacement exact
+    const next = [...userAlerts, { id: 'u' + Date.now(), type, coord, at: Date.now(), source: 'vous' }];
     setUserAlerts(next);
     store.setAlerts(next);
     showToast(`${ALERT_LABEL[type]} signalé. Merci !`);
@@ -266,6 +298,17 @@ function GpsScreen() {
   const routeFeatures: GeoJSON.FeatureCollection = {
     type: 'FeatureCollection',
     features: routes.map((r, i) => ({ type: 'Feature', geometry: r.geometry, properties: { idx: i, sel: i === sel } })),
+  };
+
+  const zoneFeatures: GeoJSON.FeatureCollection = {
+    type: 'FeatureCollection',
+    features: alerts.filter((a) => a.type === 'police').map((a) => ({
+      type: 'Feature', geometry: { type: 'Polygon', coordinates: [circle(a.coord, CONTRAVENTION_ZONE_M)] }, properties: {} })),
+  };
+  const batteryLine = (steps: Step[]) => {
+    if (!vehicle) return '';
+    const pct = arrivalPct(steps, vehicle);
+    return pct <= 0 ? '🔋 recharge nécessaire' : `🔋 ${Math.round(pct)} % à l'arrivée`;
   };
 
   const step = nav ? nav.steps[nav.stepIdx] : null;
@@ -299,7 +342,11 @@ function GpsScreen() {
           <Layer type="line" id="routes-sel" filter={['==', ['get', 'sel'], true]}
             paint={{ 'line-color': '#17a589', 'line-width': 6 }} layout={{ 'line-cap': 'round', 'line-join': 'round' }} />
         </GeoJSONSource>
-        {alerts.map((a) => (
+        <GeoJSONSource id="zones" data={zoneFeatures}>
+          <Layer type="fill" id="zones-fill" paint={{ 'fill-color': '#e67e22', 'fill-opacity': 0.18 }} />
+          <Layer type="line" id="zones-line" paint={{ 'line-color': '#e67e22', 'line-width': 2, 'line-dasharray': [2, 2] }} />
+        </GeoJSONSource>
+        {alerts.filter((a) => a.type !== 'police').map((a) => (
           <Marker key={a.id} id={a.id} lngLat={a.coord}>
             <Text style={styles.alertIcon}>{ALERT_ICON[a.type]}</Text>
           </Marker>
@@ -374,7 +421,14 @@ function GpsScreen() {
                   via {r.legs[0].summary || `itinéraire ${i + 1}`}{r.hazards.length ? ` · ⚠ ${r.hazards.length} signalement(s)` : ''}
                 </Text>
               </View>
-              <Text style={styles.muted}>Arrivée {fmtTime(new Date(Date.now() + r.eta * 1000))}</Text>
+              <View style={{ alignItems: 'flex-end' }}>
+                <Text style={styles.muted}>Arrivée {fmtTime(new Date(Date.now() + r.eta * 1000))}</Text>
+                {vehicle ? (
+                  <Text style={[styles.muted, arrivalPct(r.legs.flatMap((l) => l.steps), vehicle) < LOW_BATTERY_PCT && styles.low]}>
+                    {batteryLine(r.legs.flatMap((l) => l.steps))}
+                  </Text>
+                ) : null}
+              </View>
             </Pressable>
           ))}
           <View style={styles.row}>
@@ -402,6 +456,7 @@ function GpsScreen() {
             <View>
               <Text style={styles.navEta}>{fmtDur(remaining)}</Text>
               <Text style={styles.muted}>Arrivée {fmtTime(new Date(Date.now() + remaining * 1000))}</Text>
+              {vehicle ? <Text style={styles.muted}>{batteryLine(nav.steps.slice(nav.stepIdx))}</Text> : null}
             </View>
             <RoundButton label={voice.isMuted ? '🔇' : '🔊'} onPress={voice.toggleMute} />
             <Pressable style={[styles.btn, styles.danger]} onPress={() => { logTrip(false); stopNav(); }}>
@@ -484,4 +539,5 @@ const styles = StyleSheet.create({
   toastText: { color: C.bg, textAlign: 'center' },
   alertIcon: { fontSize: 24 },
   destPin: { fontSize: 32 },
+  low: { color: C.danger, fontWeight: '700' },
 });
