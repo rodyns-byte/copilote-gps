@@ -1,13 +1,19 @@
 {
   "expo": {
-    "name": "gps-mobile",
-    "slug": "gps-mobile",
+    "name": "Copilote GPS",
+    "slug": "copilote-gps",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "light",
     "ios": {
-      "supportsTablet": true
+      "supportsTablet": true,
+      "bundleIdentifier": "com.copilote.gps",
+      "infoPlist": {
+        "UIBackgroundModes": [
+          "audio"
+        ]
+      }
     },
     "android": {
       "adaptiveIcon": {
@@ -16,10 +22,28 @@
         "backgroundImage": "./assets/android-icon-background.png",
         "monochromeImage": "./assets/android-icon-monochrome.png"
       },
-      "predictiveBackGestureEnabled": false
+      "predictiveBackGestureEnabled": false,
+      "package": "com.copilote.gps"
     },
     "web": {
       "favicon": "./assets/favicon.png"
-    }
+    },
+    "plugins": [
+      "@maplibre/maplibre-react-native",
+      [
+        "expo-location",
+        {
+          "locationWhenInUsePermission": "Copilote GPS utilise votre position pour vous guider."
+        }
+      ],
+      [
+        "expo-speech-recognition",
+        {
+          "microphonePermission": "Copilote GPS utilise le micro pour comprendre vos demandes vocales.",
+          "speechRecognitionPermission": "Copilote GPS transcrit vos demandes vocales pour préparer l'itinéraire."
+        }
+      ]
+    ],
+    "scheme": "copilotegps"
   }
 }
