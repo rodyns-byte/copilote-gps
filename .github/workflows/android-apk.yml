@@ -23,7 +23,15 @@ jobs:
         with:
           distribution: temurin
           java-version: 21
-      # Le SDK Android est déjà installé sur les machines GitHub (ANDROID_HOME) ; Gradle ajoute ce qui manque.
+      # Le SDK Android est déjà sur les machines GitHub ; on ajoute les versions utilisées par l'app (3 essais si un téléchargement échoue).
+      - name: Composants Android
+        run: |
+          SDKM=$(ls -d $ANDROID_HOME/cmdline-tools/*/bin/sdkmanager | tail -1)
+          for i in 1 2 3; do
+            yes | $SDKM --install "ndk;27.1.12297006" "platforms;android-37.0" "build-tools;37.0.0" "build-tools;36.0.0" "cmake;3.22.1" > /dev/null && break
+            echo "Nouvel essai ($i)"; rm -rf $ANDROID_HOME/ndk/27.1.12297006; sleep 10
+          done
+          ls $ANDROID_HOME/ndk/27.1.12297006/source.properties
       - run: npm ci
       - run: npx expo prebuild --platform android --no-install
         env:
