@@ -53,7 +53,8 @@
           }
         }
       ],
-      "./plugins/withCarSupport"
+      "./plugins/withCarSupport",
+      "./plugins/withCrashReport"
     ],
     "scheme": "copilotegps"
   }

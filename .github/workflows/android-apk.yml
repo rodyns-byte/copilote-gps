@@ -1,11 +1,14 @@
 # Construit un APK de test à chaque push (ou à la demande depuis l'onglet Actions).
-# L'APK se télécharge dans les « Artifacts » de l'exécution.
+# L'APK se télécharge depuis la page « Releases » du dépôt (version « test »), directement sur le téléphone.
 name: APK Android de test
 
 on:
   push:
     branches: [main]
   workflow_dispatch:
+
+permissions:
+  contents: write
 
 jobs:
   apk:
@@ -27,8 +30,15 @@ jobs:
           CI: 1
       - name: Construire l'APK
         working-directory: android
-        run: ./gradlew assembleRelease --no-daemon
+        run: ./gradlew assembleRelease --no-daemon -PreactNativeArchitectures=arm64-v8a,armeabi-v7a
+      - run: cp android/app/build/outputs/apk/release/app-release.apk copilote-gps-test.apk
       - uses: actions/upload-artifact@v4
         with:
           name: copilote-gps-apk
-          path: android/app/build/outputs/apk/release/*.apk
+          path: copilote-gps-test.apk
+      - name: Publier dans « Releases »
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete test --yes --cleanup-tag || true
+          gh release create test copilote-gps-test.apk --title "APK de test" --notes "Version du $(date -u +%d/%m/%Y) (commit ${GITHUB_SHA::7}). Ouvrez ce lien sur le téléphone et touchez copilote-gps-test.apk."
