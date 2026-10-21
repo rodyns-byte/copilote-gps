@@ -23,7 +23,7 @@ jobs:
         with:
           distribution: temurin
           java-version: 21
-      - uses: android-actions/setup-android@v3
+      # Le SDK Android est déjà installé sur les machines GitHub (ANDROID_HOME) ; Gradle ajoute ce qui manque.
       - run: npm ci
       - run: npx expo prebuild --platform android --no-install
         env:
