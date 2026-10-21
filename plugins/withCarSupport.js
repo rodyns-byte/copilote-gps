@@ -11,11 +11,18 @@ const withAndroid = (config) => {
     const dir = path.join(c.modRequest.platformProjectRoot, 'app/src/main/res/font');
     fs.mkdirSync(dir, { recursive: true });
     fs.copyFileSync(path.join(c.modRequest.projectRoot, FONT), path.join(dir, 'material_icons.ttf'));
+    // R8 supprimait les classes que Nitro charge par leur nom (plantage « ClassNotFoundException HybridAutoPlayTiming »).
+    const rules = path.join(c.modRequest.platformProjectRoot, 'app/proguard-rules.pro');
+    const keep = '\n# Android Auto / CarPlay (Nitro charge ces classes par leur nom)\n-keep class com.margelo.nitro.** { *; }\n';
+    if (!fs.readFileSync(rules, 'utf8').includes('com.margelo.nitro')) fs.appendFileSync(rules, keep);
     return c;
   }]);
   return withGradleProperties(config, (c) => {
-    c.modResults = c.modResults.filter((p) => p.key !== 'ReactNativeAutoPlay_androidAutoAppCategory');
-    c.modResults.push({ type: 'property', key: 'ReactNativeAutoPlay_androidAutoAppCategory', value: 'navigation' });
+    const set = { ReactNativeAutoPlay_androidAutoAppCategory: 'navigation',
+      // Version de test : pas de réduction du code par R8, pour éviter d'autres classes supprimées par erreur.
+      'android.enableMinifyInReleaseBuilds': 'false' };
+    c.modResults = c.modResults.filter((p) => !(p.key in set));
+    for (const [key, value] of Object.entries(set)) c.modResults.push({ type: 'property', key, value });
     return c;
   });
 };
