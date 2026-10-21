@@ -68,6 +68,21 @@ Elle affiche chaque arrêt (km, batterie en arrivant et en repartant, durée), a
 vous guide de borne en borne et annonce chaque arrêt. Depuis la voiture, ce calcul se fait automatiquement.
 La puissance des bornes vient d'OpenStreetMap : elle est parfois absente (50 kW supposés) et la disponibilité en temps réel n'est pas connue.
 
+## Zones de contravention
+
+Les radars fixes connus d'OpenStreetMap (`highway=speed_camera` et relations `enforcement`) sont chargés automatiquement
+autour de la carte et le long du trajet (`src/lib/radars.ts`, cache d'une semaine sur le téléphone). Comme l'exige la loi
+française, ils ne sont jamais montrés à leur emplacement : chaque radar devient une zone de 500 m dont le centre est décalé
+de façon stable (jusqu'à 250 m). Réglages : radars automatiques, affichage sur la carte, annonce vocale, distance
+d'avertissement (200 m, 500 m ou 1 km). Un bandeau orange s'affiche tant que vous êtes dans une zone.
+
+## Choix de la voiture
+
+Dans Réglages > Ma voiture : recherche du modèle dans une liste de voitures électriques vendues en France (`src/lib/evs.ts`),
+qui remplit batterie, consommation et puissance de charge. La recherche par plaque utilise RegCheck « CheckFrance »
+(`src/lib/plate.ts`) : service payant au crédit (10 crédits offerts à l'inscription sur regcheck.org.uk), il faut saisir
+son nom d'utilisateur RegCheck. Pour une application publiée, cet appel doit passer par votre serveur.
+
 ## Android Auto et CarPlay
 
 Le code est dans `src/car/` (bibliothèque `@iternio/react-native-auto-play`). Sur l'écran de la voiture :

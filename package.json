@@ -3,6 +3,7 @@
   "version": "1.0.0",
   "main": "index.ts",
   "dependencies": {
+    "@expo/vector-icons": "^15.0.2",
     "@iternio/react-native-auto-play": "^0.9.2",
     "@maplibre/maplibre-react-native": "^11.5.0",
     "@react-native-async-storage/async-storage": "2.2.0",

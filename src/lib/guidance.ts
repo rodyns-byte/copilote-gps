@@ -5,7 +5,7 @@ import type { ChargePlan, ChargeStop } from './charging';
 import { CONFIG } from './config';
 import { dist, distToLine, fmtDist, type LngLat } from './geo';
 import { instruction, lower, type Route, type Step } from './routing';
-import type { RoadAlert } from './storage';
+import { DEFAULT_ZONES, type RoadAlert, type ZoneSettings } from './storage';
 import { arrivalPct, LOW_BATTERY_PCT, type Vehicle } from './vehicle';
 
 export type Guidance = {
@@ -41,7 +41,8 @@ export function rerouted(g: Guidance, r: Route) {
 /** Bornes du plan de recharge qui restent à atteindre (pour un recalcul). */
 export const remainingChargers = (g: Guidance): LngLat[] => g.charge ? g.charge.stops.slice(g.stopsDone).map((s) => s.charger.coord) : [];
 
-export function guide(g: Guidance, f: { coord: LngLat; speed: number }, alerts: RoadAlert[], vehicle: Vehicle | null): GuidanceEvent[] {
+export function guide(g: Guidance, f: { coord: LngLat; speed: number }, alerts: RoadAlert[], vehicle: Vehicle | null,
+  zones: ZoneSettings = DEFAULT_ZONES): GuidanceEvent[] {
   const out: GuidanceEvent[] = [];
   const line = g.route.geometry.coordinates;
   // 1) hors trajet ? -> recalcul automatique
@@ -73,15 +74,22 @@ export function guide(g: Guidance, f: { coord: LngLat; speed: number }, alerts: 
   if (d < 40) atStop(g.stepIdx);
   // 3) dangers devant nous
   for (const a of alerts) {
-    const ad = dist(f.coord, a.coord);
     const zone = a.type === 'police';
-    const reach = zone ? CONTRAVENTION_ZONE_M + 200 : CONFIG.alertAheadMeters;
-    if (ad < reach && !g.alerted.has(a.id) && distToLine(a.coord, line).i >= near.i && distToLine(a.coord, line).d < (zone ? CONTRAVENTION_ZONE_M : 80)) {
-      g.alerted.add(a.id);
-      // Zone de contravention : on annonce la zone, jamais la distance exacte d'un radar.
-      const text = zone ? 'Vous entrez dans une zone de contravention' : `${ALERT_LABEL[a.type]} à ${fmtDist(ad)}`;
-      out.push({ type: 'alert', alert: a, text,
-        spoken: zone ? text + ', respectez les limitations' : `Attention, ${ALERT_LABEL[a.type].toLowerCase()} signalé à ${fmtDist(ad)}` });
+    if (g.alerted.has(a.id) || (zone && !zones.show && !zones.voice)) continue;
+    const ad = dist(f.coord, a.coord);
+    const reach = zone ? CONTRAVENTION_ZONE_M + zones.warnM : CONFIG.alertAheadMeters;
+    if (ad > reach) continue;
+    const onLine = distToLine(a.coord, line);
+    if (onLine.i < near.i - 1 || onLine.d > (zone ? CONTRAVENTION_ZONE_M : 80)) continue;
+    g.alerted.add(a.id);
+    if (zone) {
+      // Zone de contravention : on annonce la zone, jamais l'emplacement exact d'un radar.
+      const inside = ad <= CONTRAVENTION_ZONE_M;
+      const text = inside ? 'Vous entrez dans une zone de contravention' : `Zone de contravention dans ${fmtDist(ad - CONTRAVENTION_ZONE_M)}`;
+      out.push({ type: 'alert', alert: a, text, spoken: zones.voice ? text + ', respectez les limitations' : '' });
+    } else {
+      out.push({ type: 'alert', alert: a, text: `${ALERT_LABEL[a.type]} à ${fmtDist(ad)}`,
+        spoken: `Attention, ${ALERT_LABEL[a.type].toLowerCase()} signalé à ${fmtDist(ad)}` });
     }
   }
   // 4) batterie à l'arrivée trop basse ?
@@ -110,3 +118,7 @@ export function carSnapshot(g: Guidance, dest: { name: string; label: string; co
     batteryPct: g.charge ? g.charge.arrivalPct : vehicle ? arrivalPct(g.steps.slice(g.stepIdx), vehicle) : null,
   };
 }
+
+/** Êtes-vous dans une zone de contravention ? (pour le bandeau orange) */
+export const inZone = (pos: LngLat, alerts: RoadAlert[]) =>
+  alerts.some((a) => a.type === 'police' && dist(pos, a.coord) <= CONTRAVENTION_ZONE_M);

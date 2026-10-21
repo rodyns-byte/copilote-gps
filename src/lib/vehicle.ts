@@ -2,6 +2,8 @@
 import type { Step } from './routing';
 
 export type Vehicle = {
+  model?: string; // ex. « Renault 5 E-Tech (52 kWh) », choisi dans la liste ou trouvé par la plaque
+  plate?: string;
   capacityKwh: number; // capacité utile de la batterie
   consumption: number; // consommation moyenne en kWh/100 km (vitesse mixte)
   maxChargeKw?: number; // puissance de recharge maximale acceptée par la voiture

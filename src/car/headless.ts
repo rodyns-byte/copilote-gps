@@ -10,7 +10,8 @@ import { fetchRoutes, personalFactor, rankRoutes } from '../lib/routing';
 import { type AlertType, type Place, type RoadAlert, type Settings, store, type Trip } from '../lib/storage';
 import { arrivalPct } from '../lib/vehicle';
 import { CONFIG } from '../lib/config';
-import { blur } from '../lib/geo';
+import { blur, distToLine } from '../lib/geo';
+import { cellsAhead, loadZones } from '../lib/radars';
 import { ALERT_LABEL, CONTRAVENTION_ZONE_M } from '../lib/alerts';
 import { carBridge } from './bridge';
 
@@ -22,6 +23,8 @@ let pos: LngLat | null = null;
 let settings: Settings | null = null;
 let trips: Trip[] = [];
 let alerts: RoadAlert[] = [];
+let zones: RoadAlert[] = []; // zones de contravention connues (OpenStreetMap)
+let zonesAt = 0;
 
 async function load() {
   [settings, trips, alerts] = await Promise.all([store.getSettings(), store.getTrips(), store.getAlerts()]);
@@ -45,12 +48,16 @@ async function watch() {
 
 function tick(p: LngLat, speed: number) {
   const n = nav!;
-  for (const ev of guide(n, { coord: p, speed }, alerts, settings?.vehicle ?? null)) {
+  if (settings?.zones.osm !== false && Date.now() - zonesAt > 60e3) {
+    zonesAt = Date.now();
+    loadZones(cellsAhead(p, n.route.geometry.coordinates, distToLine(p, n.route.geometry.coordinates).i)).then((z) => { zones = z; }).catch(() => {});
+  }
+  for (const ev of guide(n, { coord: p, speed }, [...alerts, ...zones], settings?.vehicle ?? null, settings?.zones)) {
     if (ev.type === 'reroute') { reroute(); return; }
     if (ev.type === 'arrive') { finish(true); return; }
     if (ev.type === 'say') say(ev.text);
     if (ev.type === 'charger') { say(ev.text); carBridge.notice({ title: ev.stop.charger.name, subtitle: `Rechargez jusqu'à ${ev.stop.departPct} %` }); }
-    if (ev.type === 'alert') { say(ev.spoken); carBridge.notice({ title: ev.text }); }
+    if (ev.type === 'alert') { if (ev.spoken) say(ev.spoken); carBridge.notice({ title: ev.text }); }
   }
   carBridge.publish({ nav: carSnapshot(n, n.dest, p, personalFactor(trips), settings?.vehicle ?? null), position: p });
 }

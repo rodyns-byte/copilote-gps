@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { ActivityIndicator, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
+import { ActivityIndicator, Pressable, ScrollView, StyleSheet, Text, TextInput, useWindowDimensions, View } from 'react-native';
+import { MaterialIcons } from '@expo/vector-icons';
 import { StatusBar } from 'expo-status-bar';
 import { SafeAreaProvider, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { activateKeepAwakeAsync, deactivateKeepAwake } from 'expo-keep-awake';
@@ -8,20 +9,42 @@ import { Camera, type CameraRef, GeoJSONSource, Layer, Map, Marker, NativeUserLo
 import { CONFIG } from './src/lib/config';
 import { bbox, blur, circle, dist, distToLine, fmtDist, fmtDur, fmtTime } from './src/lib/geo';
 import { parseLocal, parseWithClaude, type Command } from './src/lib/nlu';
-import { ARROW, type Avoid, lower, fetchRoutes, instruction, personalFactor, rankRoutes, type Route, type Step } from './src/lib/routing';
+import { type Avoid, lower, fetchRoutes, instruction, personalFactor, rankRoutes, type Route, type Step } from './src/lib/routing';
 import { fetchIncidents, geocode, predictDestinations } from './src/lib/services';
-import { type AlertType, type Place, type RoadAlert, type Settings, store, type Trip } from './src/lib/storage';
+import { type AlertType, DEFAULT_SETTINGS, type Place, type RoadAlert, type Settings, store, type Trip } from './src/lib/storage';
+import { cellsAhead, cellsForBounds, loadZones } from './src/lib/radars';
 import { type Fix, useLocation } from './src/hooks/useLocation';
 import { useVoice } from './src/hooks/useVoice';
 import { arrivalPct, LOW_BATTERY_PCT, readCarBattery } from './src/lib/vehicle';
 import { type ChargePlan, planCharging, RESERVE_PCT, TARGET_PCT } from './src/lib/charging';
-import { AlertSheet, ALERT_ICON, ALERT_LABEL, CONTRAVENTION_ZONE_M } from './src/components/AlertSheet';
+import { AlertSheet, ALERT_LABEL, ALERT_MI, CONTRAVENTION_ZONE_M } from './src/components/AlertSheet';
 import { SettingsSheet } from './src/components/SettingsSheet';
-import { carSnapshot, departureText, guide, type Guidance, newGuidance, remainingChargers, remainingSeconds, rerouted } from './src/lib/guidance';
+import { carSnapshot, departureText, guide, type Guidance, inZone, newGuidance, remainingChargers, remainingSeconds, rerouted } from './src/lib/guidance';
 import { carBridge } from './src/car/bridge';
 import { C } from './src/components/theme';
 
 type Nav = Guidance & { startedAt: number; predicted: number; dest: Place };
+type IconName = keyof typeof MaterialIcons.glyphMap;
+
+/** Icône de la manœuvre (Valhalla type + direction). */
+function maneuverIcon(m: Step['maneuver']): IconName {
+  const side = m.modifier?.includes('left') ? 'left' : 'right';
+  switch (m.type) {
+    case 'arrive': return 'flag';
+    case 'waypoint': return 'ev-station';
+    case 'depart': return 'navigation';
+    case 'roundabout': case 'exit roundabout': return 'roundabout-right';
+    case 'fork': return m.modifier === 'straight' ? 'straight' : `fork-${side}`;
+    case 'on ramp': case 'off ramp': return m.modifier === 'straight' ? 'straight' : `ramp-${side}`;
+    case 'merge': return 'merge';
+    case 'turn':
+      if (m.modifier === 'uturn') return 'u-turn-left';
+      if (m.modifier?.startsWith('sharp')) return `turn-sharp-${side}`;
+      if (m.modifier?.startsWith('slight')) return `turn-slight-${side}`;
+      return `turn-${side}`;
+    default: return 'straight';
+  }
+}
 
 export default function App() {
   return (
@@ -34,9 +57,12 @@ export default function App() {
 
 function GpsScreen() {
   const insets = useSafeAreaInsets();
+  const { height } = useWindowDimensions();
   const camera = useRef<CameraRef>(null);
 
-  const [settings, setSettings] = useState<Settings>({ home: null, work: null, claudeKey: '', tomtomKey: '', vehicle: null });
+  const [settings, setSettings] = useState<Settings>(DEFAULT_SETTINGS);
+  const [osmZones, setOsmZones] = useState<RoadAlert[]>([]);
+  const [follow, setFollow] = useState(true); // la carte suit la voiture pendant le guidage
   const [trips, setTrips] = useState<Trip[]>([]);
   const [userAlerts, setUserAlerts] = useState<RoadAlert[]>([]);
   const [incidents, setIncidents] = useState<RoadAlert[]>([]);
@@ -61,7 +87,7 @@ function GpsScreen() {
   navRef.current = nav;
   const fixRef = useRef<Fix | null>(null);
 
-  const alerts = [...userAlerts.filter((a) => Date.now() - a.at < CONFIG.alertLifetimeMs), ...incidents];
+  const alerts = [...userAlerts.filter((a) => Date.now() - a.at < CONFIG.alertLifetimeMs), ...incidents, ...(settings.zones.osm ? osmZones : [])];
   const alertsRef = useRef(alerts);
   alertsRef.current = alerts;
 
@@ -82,6 +108,30 @@ function GpsScreen() {
     const i = setInterval(load, 120000);
     return () => { clearTimeout(t); clearInterval(i); };
   }, [settings.tomtomKey, bounds?.join()]);
+
+  // ---------- zones de contravention (radars fixes OpenStreetMap) ----------
+  const zonesKey = useRef('');
+  function refreshZones(keys: string[]) {
+    const k = keys.sort().join();
+    if (!keys.length || k === zonesKey.current) return;
+    zonesKey.current = k;
+    loadZones(keys).then(setOsmZones).catch(() => {});
+  }
+  useEffect(() => {
+    if (!settings.zones.osm || nav || !bounds) return;
+    const t = setTimeout(() => refreshZones(cellsForBounds(bounds)), 1200);
+    return () => clearTimeout(t);
+  }, [settings.zones.osm, !!nav, bounds?.join()]);
+  useEffect(() => {
+    if (!settings.zones.osm || !nav) return;
+    const load = () => {
+      const n = navRef.current, f = fixRef.current;
+      if (n && f) refreshZones(cellsAhead(f.coord, n.route.geometry.coordinates, distToLine(f.coord, n.route.geometry.coordinates).i));
+    };
+    load();
+    const i = setInterval(load, 30e3);
+    return () => clearInterval(i);
+  }, [settings.zones.osm, !!nav]);
 
   // ---------- batterie de la voiture (lue toutes les 5 min pendant la navigation si la voiture est connectée) ----------
   const vehicle = settings.vehicle;
@@ -118,21 +168,43 @@ function GpsScreen() {
 
   function navTick(f: Fix) {
     const n = navRef.current!;
-    for (const ev of guide(n, f, alertsRef.current, settingsRef.current.vehicle)) {
+    for (const ev of guide(n, f, alertsRef.current, settingsRef.current.vehicle, settingsRef.current.zones)) {
       if (ev.type === 'reroute') { reroute(); return; }
       if (ev.type === 'arrive') { finishNav(); return; }
       if (ev.type === 'say') say(ev.text);
       if (ev.type === 'charger') { say(ev.text); carBridge.notice({ title: ev.stop.charger.name, subtitle: `Rechargez jusqu'à ${ev.stop.departPct} %` }); }
-      if (ev.type === 'alert') { showToast(ev.text); say(ev.spoken); carBridge.notice({ title: ev.text }); }
+      if (ev.type === 'alert') { showToast(ev.text); if (ev.spoken) say(ev.spoken); carBridge.notice({ title: ev.text }); }
     }
     carBridge.publish({ nav: carSnapshot(n, n.dest, f.coord, personalFactor(trips), settingsRef.current.vehicle), position: f.coord });
-    // 5) la caméra suit
-    camera.current?.easeTo({ center: f.coord, bearing: is3dRef.current ? f.heading : 0, pitch: is3dRef.current ? 60 : 0,
-      zoom: f.speed > 25 ? 15 : 17, duration: 900, padding: { top: 0, left: 0, right: 0, bottom: 200 } });
+    if (followRef.current) followCar(f, 1000);
     force((x) => x + 1);
   }
   const is3dRef = useRef(is3d);
   is3dRef.current = is3d;
+  const followRef = useRef(follow);
+  followRef.current = follow;
+
+  /**
+   * La caméra suit la voiture, orientée dans le sens de la marche, avec la position en bas de l'écran
+   * (marge haute) pour voir loin devant. Animation linéaire d'une position GPS à la suivante : mouvement continu.
+   */
+  function followCar(f: Fix, duration: number) {
+    const zoom = f.speed > 30 ? 15 : f.speed > 17 ? 16 : 17;
+    camera.current?.easeTo({ center: f.coord, bearing: f.heading, pitch: is3dRef.current ? 55 : 0, zoom, duration, easing: 'linear',
+      padding: { top: height * 0.45, left: 0, right: 0, bottom: 0 } });
+  }
+  function recenter() {
+    setFollow(true); followRef.current = true;
+    if (fixRef.current) followCar(fixRef.current, 600);
+  }
+  function overview() {
+    const n = navRef.current, f = fixRef.current;
+    if (!n || !f) return;
+    setFollow(false); followRef.current = false;
+    const line = n.route.geometry.coordinates;
+    const [w, s, e, no] = bbox([f.coord, ...line.slice(distToLine(f.coord, line).i)]);
+    camera.current?.fitBounds([w, s, e, no], { padding: { top: 220, bottom: 200, left: 50, right: 50 }, bearing: 0, pitch: 0, duration: 800 });
+  }
 
   // ---------- commandes (texte ou voix) ----------
   async function handleCommand(text: string) {
@@ -230,7 +302,7 @@ function GpsScreen() {
     if (!route || !target) return;
     const n: Nav = { ...newGuidance(route, plan), startedAt: Date.now(), predicted: route.duration, dest: target };
     setNav(n); navRef.current = n;
-    setRoutes([route]); setSel(0); setIs3d(true); is3dRef.current = true;
+    setRoutes([route]); setSel(0); setIs3d(true); is3dRef.current = true; setFollow(true); followRef.current = true;
     activateKeepAwakeAsync().catch(() => {});
     refreshBattery();
     say(departureText(n));
@@ -290,7 +362,8 @@ function GpsScreen() {
     setNav(null); navRef.current = null; clearRoute(); setIs3d(false);
     carBridge.publish({ nav: null });
     deactivateKeepAwake();
-    if (fixRef.current) camera.current?.easeTo({ center: fixRef.current.coord, pitch: 0, bearing: 0, zoom: 15, duration: 600 });
+    if (fixRef.current) camera.current?.easeTo({ center: fixRef.current.coord, pitch: 0, bearing: 0, zoom: 15, duration: 600,
+      padding: { top: 0, left: 0, right: 0, bottom: 0 } });
   }
 
   // ---------- signalements ----------
@@ -309,31 +382,37 @@ function GpsScreen() {
 
   // ---------- rendu ----------
   const preds = predictDestinations(trips).filter((p) => p.score > 0.5);
-  const chips: { label: string; place: Place }[] = [];
-  if (preds[0]?.score > 3) chips.push({ label: `✨ ${preds[0].name} (habituel à cette heure)`, place: { ...preds[0], label: preds[0].name } });
-  if (settings.home) chips.push({ label: '🏠 Maison', place: settings.home });
-  if (settings.work) chips.push({ label: '💼 Travail', place: settings.work });
-  preds.slice(preds[0]?.score > 3 ? 1 : 0).forEach((p) => chips.push({ label: `🕘 ${p.name}`, place: { ...p, label: p.name } }));
+  const chips: { label: string; icon: IconName; place: Place }[] = [];
+  if (preds[0]?.score > 3) chips.push({ label: `${preds[0].name}`, icon: 'auto-awesome', place: { ...preds[0], label: preds[0].name } });
+  if (settings.home) chips.push({ label: 'Maison', icon: 'home', place: settings.home });
+  if (settings.work) chips.push({ label: 'Travail', icon: 'work', place: settings.work });
+  preds.slice(preds[0]?.score > 3 ? 1 : 0).forEach((p) => chips.push({ label: p.name, icon: 'history', place: { ...p, label: p.name } }));
 
   const routeFeatures: GeoJSON.FeatureCollection = {
     type: 'FeatureCollection',
     features: routes.map((r, i) => ({ type: 'Feature', geometry: r.geometry, properties: { idx: i, sel: i === sel } })),
   };
 
+  const zones = alerts.filter((a) => a.type === 'police');
   const zoneFeatures: GeoJSON.FeatureCollection = {
     type: 'FeatureCollection',
-    features: alerts.filter((a) => a.type === 'police').map((a) => ({
-      type: 'Feature', geometry: { type: 'Polygon', coordinates: [circle(a.coord, CONTRAVENTION_ZONE_M)] }, properties: {} })),
+    features: settings.zones.show ? zones.map((a) => ({
+      type: 'Feature', geometry: { type: 'Polygon', coordinates: [circle(a.coord, CONTRAVENTION_ZONE_M)] }, properties: {} })) : [],
   };
-  const batteryLine = (steps: Step[]) => {
+  const inside = !!fix && settings.zones.show && inZone(fix.coord, zones);
+  const batteryText = (steps: Step[]) => {
     if (!vehicle) return '';
     const pct = arrivalPct(steps, vehicle);
-    return pct <= 0 ? '🔋 recharge nécessaire' : `🔋 ${Math.round(pct)} % à l'arrivée`;
+    return pct <= 0 ? 'Recharge nécessaire' : `${Math.round(pct)} % à l'arrivée`;
   };
 
   const step = nav ? nav.steps[nav.stepIdx] : null;
+  const next = nav ? nav.steps[nav.stepIdx + 1] : null;
   const stepDist = step && fix ? dist(fix.coord, step.maneuver.location) : 0;
   const remaining = nav ? remainingSeconds(nav, personalFactor(trips)) : 0;
+  const remainingM = nav ? nav.steps.slice(nav.stepIdx).reduce((s, x) => s + x.distance, 0) : 0;
+  const bottomCard = insets.bottom + 108;
+  const fastest = routes.length ? routes.reduce((b, r, i) => (r.eta < routes[b].eta ? i : b), 0) : 0;
 
   return (
     <View style={styles.root}>
@@ -342,6 +421,7 @@ function GpsScreen() {
         mapStyle={CONFIG.mapStyle}
         compass={false}
         attributionPosition={{ bottom: 8, left: 8 }}
+        onRegionWillChange={(e) => { if (navRef.current && e.nativeEvent.userInteraction) { setFollow(false); followRef.current = false; } }}
         onRegionDidChange={(e) => {
           const b = e.nativeEvent.bounds;
           setBounds([b[0], b[1], b[2], b[3]]);
@@ -354,113 +434,152 @@ function GpsScreen() {
             <Layer type="raster" id="traffic" paint={{ 'raster-opacity': 0.75 }} />
           </RasterSource>
         ) : null}
+        <GeoJSONSource id="zones" data={zoneFeatures}>
+          <Layer type="fill" id="zones-fill" paint={{ 'fill-color': C.warn, 'fill-opacity': 0.16 }} />
+          <Layer type="line" id="zones-line" paint={{ 'line-color': C.warn, 'line-width': 2.5, 'line-dasharray': [2, 1.5] }} />
+        </GeoJSONSource>
         <GeoJSONSource id="routes" data={routeFeatures}>
           <Layer type="line" id="routes-alt" filter={['!=', ['get', 'sel'], true]}
-            paint={{ 'line-color': C.alt, 'line-width': 6, 'line-opacity': 0.8 }} layout={{ 'line-cap': 'round', 'line-join': 'round' }} />
+            paint={{ 'line-color': C.alt, 'line-width': 7, 'line-opacity': 0.9 }} layout={{ 'line-cap': 'round', 'line-join': 'round' }} />
           <Layer type="line" id="routes-casing" filter={['==', ['get', 'sel'], true]}
-            paint={{ 'line-color': '#0a4a3e', 'line-width': 10 }} layout={{ 'line-cap': 'round', 'line-join': 'round' }} />
+            paint={{ 'line-color': C.routeCasing, 'line-width': 12 }} layout={{ 'line-cap': 'round', 'line-join': 'round' }} />
           <Layer type="line" id="routes-sel" filter={['==', ['get', 'sel'], true]}
-            paint={{ 'line-color': '#17a589', 'line-width': 6 }} layout={{ 'line-cap': 'round', 'line-join': 'round' }} />
-        </GeoJSONSource>
-        <GeoJSONSource id="zones" data={zoneFeatures}>
-          <Layer type="fill" id="zones-fill" paint={{ 'fill-color': '#e67e22', 'fill-opacity': 0.18 }} />
-          <Layer type="line" id="zones-line" paint={{ 'line-color': '#e67e22', 'line-width': 2, 'line-dasharray': [2, 2] }} />
+            paint={{ 'line-color': C.route, 'line-width': 8 }} layout={{ 'line-cap': 'round', 'line-join': 'round' }} />
         </GeoJSONSource>
         {alerts.filter((a) => a.type !== 'police').map((a) => (
           <Marker key={a.id} id={a.id} lngLat={a.coord}>
-            <Text style={styles.alertIcon}>{ALERT_ICON[a.type]}</Text>
+            <View style={[styles.pin, { backgroundColor: ALERT_MI[a.type].color }]}><MaterialIcons name={ALERT_MI[a.type].icon} size={18} color="#fff" /></View>
           </Marker>
         ))}
         {charge?.stops.map((s, i) => (
-          <Marker key={'c' + i} id={'charge' + i} lngLat={s.charger.coord} anchor="bottom">
-            <Text style={styles.destPin}>⚡</Text>
+          <Marker key={'c' + i} id={'charge' + i} lngLat={s.charger.coord}>
+            <View style={[styles.pin, { backgroundColor: '#1971c2' }]}><MaterialIcons name="ev-station" size={18} color="#fff" /></View>
           </Marker>
         ))}
         {dest ? (
           <Marker id="dest" lngLat={dest.coord} anchor="bottom">
-            <Text style={styles.destPin}>📍</Text>
+            <MaterialIcons name="place" size={44} color={C.danger} style={styles.destPin} />
           </Marker>
         ) : null}
         {fix ? <NativeUserLocation mode={nav ? 'course' : 'default'} /> : null}
       </Map>
 
-      {/* Barre du haut */}
+      {/* Recherche */}
       {!nav ? (
-        <View style={[styles.top, { top: insets.top + 8 }]}>
-          <View style={styles.searchRow}>
+        <View style={[styles.top, { top: insets.top + 10 }]}>
+          <View style={styles.searchBar}>
+            <MaterialIcons name="search" size={24} color={C.muted} />
             <TextInput
               style={styles.search}
-              placeholder="Où allez-vous ? ou dites « rentre chez moi sans péage »"
+              placeholder="Où allez-vous ?"
               placeholderTextColor={C.muted}
               value={voice.listening ? voice.partial : query}
               onChangeText={setQuery}
               onSubmitEditing={() => handleCommand(query)}
               returnKeyType="go"
             />
-            <RoundButton label={voice.listening ? '■' : '🎤'} active={voice.listening} onPress={voice.listen} />
+            {query && !voice.listening ? (
+              <Pressable hitSlop={10} onPress={() => { setQuery(''); setResults([]); }}><MaterialIcons name="close" size={22} color={C.muted} /></Pressable>
+            ) : null}
+            <Pressable onPress={voice.listen} style={[styles.mic, voice.listening && { backgroundColor: C.danger }]} accessibilityLabel="Parler à l'assistant">
+              <MaterialIcons name={voice.listening ? 'stop' : 'mic'} size={22} color={voice.listening ? '#fff' : C.accent} />
+            </Pressable>
+            <Pressable onPress={() => setSheet('settings')} style={styles.mic} accessibilityLabel="Réglages">
+              <MaterialIcons name="settings" size={22} color={C.fg} />
+            </Pressable>
           </View>
           {results.length ? (
             <View style={styles.card}>
               {results.map((r, i) => (
-                <Pressable key={i} style={styles.result} onPress={() => planTo(r)}>
-                  <Text style={styles.resultName}>{r.name}</Text>
-                  <Text style={styles.muted} numberOfLines={1}>{r.label}</Text>
+                <Pressable key={i} style={({ pressed }) => [styles.result, pressed && { backgroundColor: C.surface }]} onPress={() => planTo(r)}>
+                  <View style={styles.resultIcon}><MaterialIcons name="place" size={20} color={C.accent} /></View>
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.resultName} numberOfLines={1}>{r.name}</Text>
+                    <Text style={styles.muted} numberOfLines={1}>{r.label}</Text>
+                  </View>
                 </Pressable>
               ))}
             </View>
           ) : null}
-          {assistant ? <View style={styles.assistant}><Text style={styles.text}>{assistant}</Text></View> : null}
-          {voice.error ? <View style={styles.assistant}><Text style={styles.text}>{voice.error}</Text></View> : null}
-          {denied ? <View style={styles.assistant}><Text style={styles.text}>Autorisez la localisation dans les réglages du téléphone pour utiliser le GPS.</Text></View> : null}
-          {!routes.length ? (
+          {assistant ? <Bubble icon="auto-awesome" text={assistant} /> : null}
+          {voice.error ? <Bubble icon="mic-off" text={voice.error} /> : null}
+          {denied ? <Bubble icon="location-off" text="Autorisez la localisation dans les réglages du téléphone pour utiliser le GPS." /> : null}
+          {!routes.length && !results.length ? (
             <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.chips}>
               {chips.length ? chips.map((c, i) => (
-                <Pressable key={i} style={styles.chip} onPress={() => planTo(c.place)}><Text style={styles.text}>{c.label}</Text></Pressable>
+                <Pressable key={i} style={styles.chip} onPress={() => planTo(c.place)}>
+                  <MaterialIcons name={c.icon} size={18} color={C.accent} /><Text style={styles.chipText} numberOfLines={1}>{c.label}</Text>
+                </Pressable>
               )) : (
-                <Pressable style={styles.chip} onPress={() => setSheet('settings')}><Text style={styles.text}>⚙ Enregistrer Maison et Travail</Text></Pressable>
+                <Pressable style={styles.chip} onPress={() => setSheet('settings')}>
+                  <MaterialIcons name="home" size={18} color={C.accent} /><Text style={styles.chipText}>Enregistrer Maison et Travail</Text>
+                </Pressable>
               )}
             </ScrollView>
           ) : null}
+          {inside ? <ZoneBanner /> : null}
         </View>
       ) : null}
 
       {/* Boutons de carte */}
-      <View style={[styles.fabs, { bottom: insets.bottom + (routes.length || nav ? 240 : 32) }]}>
-        <RoundButton label="◎" onPress={() => fix && camera.current?.easeTo({ center: fix.coord, zoom: 16, duration: 500 })} />
-        <RoundButton label={is3d ? '2D' : '3D'} onPress={() => {
-          const on = !is3d; setIs3d(on);
-          camera.current?.setStop({ pitch: on ? 60 : 0, duration: 600 });
-        }} />
-        <RoundButton label="⚠" onPress={() => setSheet('alert')} />
-        {!nav ? <RoundButton label="☰" onPress={() => setSheet('settings')} /> : null}
-      </View>
+      {!routes.length || nav ? (
+        <View style={[styles.fabs, { bottom: nav ? bottomCard + 16 : insets.bottom + 24 }]}>
+          <Fab icon={is3d ? 'map' : 'view-in-ar'} label={is3d ? '2D' : '3D'} onPress={() => {
+            const on = !is3d; setIs3d(on); is3dRef.current = on;
+            camera.current?.setStop({ pitch: on ? 55 : 0, duration: 600 });
+          }} />
+          {!nav ? <Fab icon="my-location" onPress={() => fix && camera.current?.easeTo({ center: fix.coord, zoom: 16, duration: 500 })} /> : null}
+          {!nav ? <Fab icon="report" color={C.warn} onPress={() => setSheet('alert')} /> : null}
+        </View>
+      ) : null}
 
       {/* Choix d'itinéraire */}
       {routes.length && !nav ? (
-        <View style={[styles.panel, { paddingBottom: insets.bottom + 14 }]}>
-          {routes.map((r, i) => (
-            <Pressable key={i} style={[styles.route, i === sel && styles.routeSel]} onPress={() => setSel(i)}>
-              <View style={{ flex: 1 }}>
-                <Text style={styles.routeMain}>{fmtDur(r.eta)} · {fmtDist(r.distance)}</Text>
-                <Text style={styles.muted} numberOfLines={1}>
-                  via {r.legs[0].summary || `itinéraire ${i + 1}`}{r.hazards.length ? ` · ⚠ ${r.hazards.length} signalement(s)` : ''}
-                </Text>
-              </View>
-              <View style={{ alignItems: 'flex-end' }}>
-                <Text style={styles.muted}>Arrivée {fmtTime(new Date(Date.now() + r.eta * 1000))}</Text>
-                {charge ? (
-                  <Text style={styles.muted}>🔋 {Math.round(charge.arrivalPct)} % à l'arrivée</Text>
-                ) : vehicle ? (
-                  <Text style={[styles.muted, arrivalPct(r.legs.flatMap((l) => l.steps), vehicle) < LOW_BATTERY_PCT && styles.low]}>
-                    {batteryLine(r.legs.flatMap((l) => l.steps))}
-                  </Text>
-                ) : null}
-              </View>
-            </Pressable>
-          ))}
+        <View style={[styles.sheet, { paddingBottom: insets.bottom + 14 }]}>
+          <View style={styles.handle} />
+          <View style={styles.sheetHead}>
+            <View style={{ flex: 1 }}>
+              <Text style={styles.destName} numberOfLines={1}>{dest?.name}</Text>
+              <Text style={styles.muted} numberOfLines={1}>{dest?.label}</Text>
+            </View>
+            <Pressable style={styles.iconBtn} onPress={clearRoute} accessibilityLabel="Annuler"><MaterialIcons name="close" size={22} color={C.fg} /></Pressable>
+          </View>
+          <ScrollView style={{ maxHeight: 230 }} contentContainerStyle={{ gap: 8 }}>
+            {routes.map((r, i) => {
+              const steps = r.legs.flatMap((l) => l.steps);
+              const low = vehicle && !charge && arrivalPct(steps, vehicle) < LOW_BATTERY_PCT;
+              return (
+                <Pressable key={i} style={[styles.route, i === sel && styles.routeSel]} onPress={() => setSel(i)}>
+                  <View style={{ flex: 1, gap: 2 }}>
+                    <View style={styles.rowCenter}>
+                      <Text style={[styles.routeMain, i === sel && { color: C.accent }]}>{fmtDur(r.eta)}</Text>
+                      <Text style={styles.routeDist}>{fmtDist(r.distance)}</Text>
+                      {i === fastest && routes.length > 1 ? <Text style={styles.tag}>Le plus rapide</Text> : null}
+                      {r.hasToll ? <Text style={[styles.tag, styles.tagGrey]}>Péage</Text> : null}
+                    </View>
+                    <Text style={styles.muted} numberOfLines={1}>
+                      Arrivée {fmtTime(new Date(Date.now() + r.eta * 1000))}{r.legs[0].summary ? ` · via ${r.legs[0].summary}` : ''}
+                    </Text>
+                    {r.hazards.length ? <Text style={[styles.muted, { color: C.warn }]}>{r.hazards.length} signalement(s) sur le trajet</Text> : null}
+                  </View>
+                  {charge || vehicle ? (
+                    <View style={styles.batt}>
+                      <MaterialIcons name={low ? 'battery-alert' : 'battery-charging-full'} size={18} color={low ? C.danger : C.accent} />
+                      <Text style={[styles.battText, low && { color: C.danger }]}>
+                        {charge ? `${Math.round(charge.arrivalPct)} %` : batteryText(steps).replace(" à l'arrivée", '')}
+                      </Text>
+                    </View>
+                  ) : null}
+                </Pressable>
+              );
+            })}
+          </ScrollView>
           {charge ? (
             <View style={styles.chargeBox}>
-              <Text style={styles.chargeTitle}>⚡ {charge.stops.length} arrêt{charge.stops.length > 1 ? 's' : ''} de recharge · {fmtDur(charge.totalChargeMin * 60)} de charge</Text>
+              <View style={styles.rowCenter}>
+                <MaterialIcons name="ev-station" size={20} color="#1971c2" />
+                <Text style={styles.chargeTitle}>{charge.stops.length} arrêt{charge.stops.length > 1 ? 's' : ''} de recharge · {fmtDur(charge.totalChargeMin * 60)} de charge</Text>
+              </View>
               {charge.stops.map((s, i) => (
                 <Text key={i} style={styles.muted} numberOfLines={1}>
                   {i + 1}. {s.charger.name} · km {Math.round(s.kmFromStart)} · {Math.round(s.arrivalPct)} % → {s.departPct} % en {Math.round(s.chargeMin)} min{s.charger.powerKw ? ` (${Math.round(s.charger.powerKw)} kW)` : ''}
@@ -468,121 +587,214 @@ function GpsScreen() {
               ))}
             </View>
           ) : vehicle && routes[sel] && arrivalPct(routes[sel].legs.flatMap((l) => l.steps), vehicle) < RESERVE_PCT ? (
-            <Pressable style={[styles.btn, styles.chargeBtn]} onPress={() => planStops()} disabled={planning}>
-              <Text style={styles.primaryText}>{planning ? 'Recherche des bornes…' : `⚡ Planifier les recharges (réserve ${RESERVE_PCT} %, charge à ${TARGET_PCT} %)`}</Text>
+            <Pressable style={styles.chargeBtn} onPress={() => planStops()} disabled={planning}>
+              {planning ? <ActivityIndicator color="#fff" /> : <MaterialIcons name="ev-station" size={20} color="#fff" />}
+              <Text style={styles.primaryText}>{planning ? 'Recherche des bornes…' : `Planifier les recharges (charge à ${TARGET_PCT} %)`}</Text>
             </Pressable>
           ) : null}
           <View style={styles.row}>
-            <Toggle label="Éviter les péages" on={avoid.toll} onPress={() => { const a = { ...avoid, toll: !avoid.toll }; setAvoid(a); dest && planTo(dest, a); }} />
-            <Toggle label="Éviter les autoroutes" on={avoid.motorway} onPress={() => { const a = { ...avoid, motorway: !avoid.motorway }; setAvoid(a); dest && planTo(dest, a); }} />
+            <Toggle icon="money-off" label="Sans péage" on={avoid.toll} onPress={() => { const a = { ...avoid, toll: !avoid.toll }; setAvoid(a); dest && planTo(dest, a); }} />
+            <Toggle icon="add-road" label="Sans autoroute" on={avoid.motorway} onPress={() => { const a = { ...avoid, motorway: !avoid.motorway }; setAvoid(a); dest && planTo(dest, a); }} />
           </View>
-          <View style={styles.row}>
-            <Pressable style={[styles.btn, styles.primary]} onPress={() => startNav()}><Text style={styles.primaryText}>Démarrer</Text></Pressable>
-            <Pressable style={styles.btn} onPress={clearRoute}><Text style={styles.text}>Annuler</Text></Pressable>
-          </View>
+          <Pressable style={({ pressed }) => [styles.start, pressed && { opacity: 0.85 }]} onPress={() => startNav()}>
+            <MaterialIcons name="navigation" size={24} color="#fff" />
+            <Text style={styles.startText}>Démarrer</Text>
+          </Pressable>
         </View>
       ) : null}
 
-      {/* Bandeau de navigation */}
+      {/* Guidage */}
       {nav && step ? (
         <>
-          <View style={[styles.navTop, { paddingTop: insets.top + 12 }]}>
-            <Text style={styles.navArrow}>{step.maneuver.type === 'arrive' ? '⚑' : step.maneuver.type === 'waypoint' ? '⚡' : ARROW[step.maneuver.modifier ?? ''] ?? '↑'}</Text>
-            <View style={{ flex: 1 }}>
-              <Text style={styles.navDist}>{fmtDist(stepDist)}</Text>
-              <Text style={styles.navText}>{instruction(step)}</Text>
+          <View style={[styles.navTopWrap, { top: insets.top + 8 }]}>
+            <View style={styles.maneuver}>
+              <View style={styles.maneuverMain}>
+                <MaterialIcons name={maneuverIcon(step.maneuver)} size={58} color="#fff" />
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.navDist}>{fmtDist(stepDist)}</Text>
+                  <Text style={styles.navText} numberOfLines={2}>{instruction(step)}</Text>
+                </View>
+              </View>
+              {next ? (
+                <View style={styles.thenRow}>
+                  <Text style={styles.thenText}>Puis</Text>
+                  <MaterialIcons name={maneuverIcon(next.maneuver)} size={20} color="#cfe9e1" />
+                  <Text style={styles.thenText} numberOfLines={1}>{next.name || lower(instruction(next))}</Text>
+                </View>
+              ) : null}
             </View>
+            {inside ? <ZoneBanner /> : null}
           </View>
-          <View style={[styles.navBottom, { paddingBottom: insets.bottom + 14 }]}>
-            <View>
-              <Text style={styles.navEta}>{fmtDur(remaining)}</Text>
-              <Text style={styles.muted}>Arrivée {fmtTime(new Date(Date.now() + remaining * 1000))}</Text>
-              {nav.charge ? <Text style={styles.muted}>🔋 {Math.round(nav.charge.arrivalPct)} % à l'arrivée · ⚡ {nav.charge.stops.length - nav.stopsDone} arrêt(s) restant(s)</Text>
-                : vehicle ? <Text style={styles.muted}>{batteryLine(nav.steps.slice(nav.stepIdx))}</Text> : null}
+
+          {fix ? (
+            <View style={[styles.speed, { bottom: bottomCard + 16 }]}>
+              <Text style={styles.speedNum}>{Math.round(fix.speed * 3.6)}</Text>
+              <Text style={styles.speedUnit}>km/h</Text>
             </View>
-            <RoundButton label={voice.isMuted ? '🔇' : '🔊'} onPress={voice.toggleMute} />
-            <Pressable style={[styles.btn, styles.danger]} onPress={() => { logTrip(false); stopNav(); }}>
-              <Text style={styles.primaryText}>Arrêter</Text>
+          ) : null}
+          {!follow ? (
+            <Pressable style={[styles.recenter, { bottom: bottomCard + 16 }]} onPress={recenter}>
+              <MaterialIcons name="navigation" size={20} color={C.accent} />
+              <Text style={styles.recenterText}>Recentrer</Text>
             </Pressable>
+          ) : null}
+
+          <View style={[styles.navBottom, { paddingBottom: insets.bottom + 12 }]}>
+            <View style={{ flex: 1 }}>
+              <Text style={styles.navEta}>{fmtDur(remaining)}</Text>
+              <Text style={styles.navSub}>{fmtDist(remainingM)} · {fmtTime(new Date(Date.now() + remaining * 1000))}</Text>
+              {nav.charge ? (
+                <Text style={styles.navBatt}>{Math.round(nav.charge.arrivalPct)} % à l'arrivée · {nav.charge.stops.length - nav.stopsDone} recharge(s)</Text>
+              ) : vehicle ? <Text style={styles.navBatt}>{batteryText(nav.steps.slice(nav.stepIdx))}</Text> : null}
+            </View>
+            <IconBtn icon={voice.isMuted ? 'volume-off' : 'volume-up'} onPress={voice.toggleMute} />
+            <IconBtn icon="report" color={C.warn} onPress={() => setSheet('alert')} />
+            <IconBtn icon="alt-route" onPress={overview} />
+            <IconBtn icon="close" color="#fff" bg={C.danger} onPress={() => { logTrip(false); stopNav(); }} />
           </View>
         </>
       ) : null}
 
-      {busy ? <ActivityIndicator style={styles.busy} size="large" color={C.accent} /> : null}
-      {toast ? <View style={[styles.toast, { bottom: insets.bottom + 250 }]}><Text style={styles.toastText}>{toast}</Text></View> : null}
+      {busy ? (
+        <View style={[styles.busy, { top: insets.top + 74 }]}>
+          <ActivityIndicator color={C.accent} /><Text style={styles.text}>Calcul de l'itinéraire…</Text>
+        </View>
+      ) : null}
+      {toast ? <View style={[styles.toast, { bottom: (nav ? bottomCard : insets.bottom) + 90 }]}><Text style={styles.toastText}>{toast}</Text></View> : null}
 
       <SettingsSheet
         visible={sheet === 'settings'}
         settings={settings}
         bounds={bounds}
         near={fix?.coord ?? null}
-        onClose={(s) => { setSheet(null); if (s) { setSettings(s); store.setSettings(s); } }}
+        onClose={(s) => { setSheet(null); if (s) { setSettings(s); store.setSettings(s); zonesKey.current = ''; } }}
       />
       <AlertSheet visible={sheet === 'alert'} onPick={addAlert} onClose={() => setSheet(null)} />
     </View>
   );
 }
 
-function RoundButton({ label, onPress, active }: { label: string; onPress: () => void; active?: boolean }) {
+function ZoneBanner() {
   return (
-    <Pressable onPress={onPress} style={[styles.round, active && { backgroundColor: C.danger }]} accessibilityRole="button">
-      <Text style={[styles.roundText, active && { color: '#fff' }]}>{label}</Text>
+    <View style={styles.zone}>
+      <MaterialIcons name="speed" size={22} color="#fff" />
+      <View style={{ flex: 1 }}>
+        <Text style={styles.zoneTitle}>Zone de contravention</Text>
+        <Text style={styles.zoneSub}>Respectez les limitations de vitesse</Text>
+      </View>
+    </View>
+  );
+}
+
+function Bubble({ icon, text }: { icon: IconName; text: string }) {
+  return (
+    <View style={styles.assistant}>
+      <MaterialIcons name={icon} size={20} color={C.accent} />
+      <Text style={[styles.text, { flex: 1 }]}>{text}</Text>
+    </View>
+  );
+}
+
+function Fab({ icon, label, onPress, color = C.fg }: { icon: IconName; label?: string; onPress: () => void; color?: string }) {
+  return (
+    <Pressable onPress={onPress} style={({ pressed }) => [styles.fab, pressed && { opacity: 0.7 }]} accessibilityRole="button" accessibilityLabel={label}>
+      {label ? <Text style={styles.fabText}>{label}</Text> : <MaterialIcons name={icon} size={24} color={color} />}
     </Pressable>
   );
 }
 
-function Toggle({ label, on, onPress }: { label: string; on: boolean; onPress: () => void }) {
+function IconBtn({ icon, onPress, color = C.fg, bg = C.surface }: { icon: IconName; onPress: () => void; color?: string; bg?: string }) {
+  return (
+    <Pressable onPress={onPress} style={({ pressed }) => [styles.iconBtn, { backgroundColor: bg }, pressed && { opacity: 0.7 }]} accessibilityRole="button">
+      <MaterialIcons name={icon} size={24} color={color} />
+    </Pressable>
+  );
+}
+
+function Toggle({ icon, label, on, onPress }: { icon: IconName; label: string; on: boolean; onPress: () => void }) {
   return (
     <Pressable onPress={onPress} style={[styles.toggle, on && styles.toggleOn]} accessibilityRole="switch" accessibilityState={{ checked: on }}>
-      <Text style={[styles.text, on && { color: C.accentFg }]}>{on ? '✓ ' : ''}{label}</Text>
+      <MaterialIcons name={on ? 'check' : icon} size={18} color={on ? '#fff' : C.fg} />
+      <Text style={[styles.toggleText, on && { color: '#fff' }]}>{label}</Text>
     </Pressable>
   );
 }
 
-const shadow = { shadowColor: '#000', shadowOpacity: 0.18, shadowRadius: 10, shadowOffset: { width: 0, height: 3 }, elevation: 4 };
+const shadow = { shadowColor: '#000', shadowOpacity: 0.16, shadowRadius: 12, shadowOffset: { width: 0, height: 4 }, elevation: 6 };
 const styles = StyleSheet.create({
   root: { flex: 1, backgroundColor: C.bg },
   text: { color: C.fg, fontSize: 15 },
   muted: { color: C.muted, fontSize: 13 },
-  top: { position: 'absolute', left: 12, right: 12, gap: 8 },
-  searchRow: { flexDirection: 'row', gap: 8 },
-  search: { flex: 1, backgroundColor: C.bg, color: C.fg, borderRadius: 12, paddingHorizontal: 14, height: 48, fontSize: 16, ...shadow },
-  card: { backgroundColor: C.bg, borderRadius: 12, padding: 4, ...shadow },
-  result: { padding: 10 },
-  resultName: { color: C.fg, fontWeight: '600', fontSize: 15 },
-  assistant: { backgroundColor: C.bg, borderLeftWidth: 4, borderLeftColor: C.accent, borderRadius: 10, padding: 10, ...shadow },
-  chips: { gap: 8, paddingVertical: 4 },
-  chip: { backgroundColor: C.bg, borderRadius: 20, paddingHorizontal: 14, paddingVertical: 8, ...shadow },
-  fabs: { position: 'absolute', right: 12, gap: 10 },
-  round: { width: 48, height: 48, borderRadius: 24, backgroundColor: C.bg, alignItems: 'center', justifyContent: 'center', ...shadow },
-  roundText: { fontSize: 18, color: C.fg, fontWeight: '600' },
-  panel: { position: 'absolute', left: 0, right: 0, bottom: 0, backgroundColor: C.bg, borderTopLeftRadius: 18, borderTopRightRadius: 18,
-    padding: 16, gap: 10, ...shadow },
-  route: { flexDirection: 'row', alignItems: 'center', gap: 10, borderWidth: 1, borderColor: C.line, borderRadius: 10, padding: 12 },
-  routeSel: { borderColor: C.accent, borderWidth: 2 },
-  routeMain: { color: C.fg, fontSize: 17, fontWeight: '700', fontVariant: ['tabular-nums'] },
   row: { flexDirection: 'row', gap: 10 },
-  toggle: { flex: 1, borderWidth: 1, borderColor: C.line, borderRadius: 10, padding: 10, alignItems: 'center' },
-  toggleOn: { backgroundColor: C.accent, borderColor: C.accent },
-  btn: { flex: 1, borderWidth: 1, borderColor: C.line, borderRadius: 10, padding: 14, alignItems: 'center' },
-  primary: { backgroundColor: C.accent, borderColor: C.accent },
-  primaryText: { color: '#fff', fontWeight: '700', fontSize: 16 },
-  danger: { backgroundColor: C.danger, borderColor: C.danger, flex: 0, paddingHorizontal: 20 },
-  navTop: { position: 'absolute', top: 0, left: 0, right: 0, backgroundColor: C.nav, flexDirection: 'row', alignItems: 'center',
-    gap: 14, paddingHorizontal: 16, paddingBottom: 14 },
-  navArrow: { color: '#fff', fontSize: 46, width: 64, textAlign: 'center' },
-  navDist: { color: '#fff', fontSize: 30, fontWeight: '700', fontVariant: ['tabular-nums'] },
-  navText: { color: '#e6f2ef', fontSize: 17 },
+  rowCenter: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  primaryText: { color: '#fff', fontWeight: '700', fontSize: 15 },
+
+  top: { position: 'absolute', left: 12, right: 12, gap: 10 },
+  searchBar: { flexDirection: 'row', alignItems: 'center', gap: 8, backgroundColor: C.bg, borderRadius: 28, height: 56, paddingLeft: 16, paddingRight: 6, ...shadow },
+  search: { flex: 1, color: C.fg, fontSize: 17, height: '100%' },
+  mic: { width: 44, height: 44, borderRadius: 22, alignItems: 'center', justifyContent: 'center', backgroundColor: C.surface },
+  card: { backgroundColor: C.bg, borderRadius: 20, paddingVertical: 6, ...shadow },
+  result: { flexDirection: 'row', alignItems: 'center', gap: 12, paddingHorizontal: 14, paddingVertical: 10 },
+  resultIcon: { width: 36, height: 36, borderRadius: 18, backgroundColor: C.accentSoft, alignItems: 'center', justifyContent: 'center' },
+  resultName: { color: C.fg, fontWeight: '600', fontSize: 16 },
+  assistant: { flexDirection: 'row', gap: 10, alignItems: 'flex-start', backgroundColor: C.bg, borderRadius: 16, padding: 12, ...shadow },
+  chips: { gap: 8, paddingVertical: 2, paddingRight: 12 },
+  chip: { flexDirection: 'row', alignItems: 'center', gap: 6, backgroundColor: C.bg, borderRadius: 20, paddingHorizontal: 14, height: 38, maxWidth: 220, ...shadow },
+  chipText: { color: C.fg, fontSize: 14, fontWeight: '600' },
+
+  fabs: { position: 'absolute', right: 12, gap: 12 },
+  fab: { width: 52, height: 52, borderRadius: 26, backgroundColor: C.bg, alignItems: 'center', justifyContent: 'center', ...shadow },
+  fabText: { fontSize: 16, color: C.fg, fontWeight: '800' },
+  pin: { width: 32, height: 32, borderRadius: 16, alignItems: 'center', justifyContent: 'center', borderWidth: 2, borderColor: '#fff', ...shadow },
+  destPin: { textShadowColor: 'rgba(0,0,0,0.3)', textShadowRadius: 4 },
+
+  sheet: { position: 'absolute', left: 0, right: 0, bottom: 0, backgroundColor: C.bg, borderTopLeftRadius: 26, borderTopRightRadius: 26,
+    paddingHorizontal: 16, paddingTop: 8, gap: 12, ...shadow },
+  handle: { alignSelf: 'center', width: 40, height: 5, borderRadius: 3, backgroundColor: C.line },
+  sheetHead: { flexDirection: 'row', alignItems: 'center', gap: 10 },
+  destName: { color: C.fg, fontSize: 20, fontWeight: '800' },
+  route: { flexDirection: 'row', alignItems: 'center', gap: 10, backgroundColor: C.surface, borderRadius: 16, padding: 14, borderWidth: 2, borderColor: 'transparent' },
+  routeSel: { borderColor: C.accent, backgroundColor: C.accentSoft },
+  routeMain: { color: C.fg, fontSize: 22, fontWeight: '800', fontVariant: ['tabular-nums'] },
+  routeDist: { color: C.muted, fontSize: 15, fontWeight: '600' },
+  tag: { fontSize: 11, fontWeight: '700', color: '#fff', backgroundColor: C.accent, borderRadius: 8, paddingHorizontal: 6, paddingVertical: 2, overflow: 'hidden' },
+  tagGrey: { backgroundColor: C.muted },
+  batt: { alignItems: 'center', gap: 2 },
+  battText: { color: C.fg, fontSize: 13, fontWeight: '700' },
+  chargeBox: { backgroundColor: '#e7f1fb', borderRadius: 14, padding: 12, gap: 4 },
+  chargeTitle: { color: C.fg, fontWeight: '700', fontSize: 15, flex: 1 },
+  chargeBtn: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8, backgroundColor: '#1971c2', borderRadius: 14, padding: 13 },
+  toggle: { flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6, backgroundColor: C.surface, borderRadius: 14, paddingVertical: 11 },
+  toggleOn: { backgroundColor: C.fg },
+  toggleText: { color: C.fg, fontSize: 14, fontWeight: '600' },
+  start: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 10, backgroundColor: C.accent, borderRadius: 30, height: 58 },
+  startText: { color: '#fff', fontSize: 19, fontWeight: '800' },
+
+  navTopWrap: { position: 'absolute', left: 10, right: 10, gap: 8 },
+  maneuver: { backgroundColor: C.nav, borderRadius: 22, overflow: 'hidden', ...shadow },
+  maneuverMain: { flexDirection: 'row', alignItems: 'center', gap: 14, paddingHorizontal: 16, paddingVertical: 14 },
+  navDist: { color: '#fff', fontSize: 34, fontWeight: '800', fontVariant: ['tabular-nums'] },
+  navText: { color: '#e3f3ee', fontSize: 17, fontWeight: '600' },
+  thenRow: { flexDirection: 'row', alignItems: 'center', gap: 8, backgroundColor: C.navDark, paddingHorizontal: 16, paddingVertical: 8 },
+  thenText: { color: '#cfe9e1', fontSize: 14, fontWeight: '600', flexShrink: 1 },
+  zone: { flexDirection: 'row', alignItems: 'center', gap: 10, backgroundColor: C.warn, borderRadius: 16, paddingHorizontal: 14, paddingVertical: 10, ...shadow },
+  zoneTitle: { color: '#fff', fontSize: 16, fontWeight: '800' },
+  zoneSub: { color: '#fff4e0', fontSize: 13 },
+  speed: { position: 'absolute', left: 12, width: 66, height: 66, borderRadius: 33, backgroundColor: C.bg, alignItems: 'center', justifyContent: 'center', ...shadow },
+  speedNum: { color: C.fg, fontSize: 24, fontWeight: '800', fontVariant: ['tabular-nums'], lineHeight: 26 },
+  speedUnit: { color: C.muted, fontSize: 11, fontWeight: '600' },
+  recenter: { position: 'absolute', alignSelf: 'center', flexDirection: 'row', alignItems: 'center', gap: 6, backgroundColor: C.bg, borderRadius: 24,
+    paddingHorizontal: 18, height: 46, ...shadow },
+  recenterText: { color: C.accent, fontSize: 15, fontWeight: '800' },
   navBottom: { position: 'absolute', left: 0, right: 0, bottom: 0, backgroundColor: C.bg, flexDirection: 'row', alignItems: 'center',
-    justifyContent: 'space-between', padding: 16, gap: 12, ...shadow },
-  navEta: { color: C.fg, fontSize: 22, fontWeight: '700', fontVariant: ['tabular-nums'] },
-  busy: { position: 'absolute', alignSelf: 'center', top: '45%' },
-  toast: { position: 'absolute', alignSelf: 'center', backgroundColor: C.fg, borderRadius: 20, paddingHorizontal: 16, paddingVertical: 10, maxWidth: '90%' },
-  toastText: { color: C.bg, textAlign: 'center' },
-  alertIcon: { fontSize: 24 },
-  destPin: { fontSize: 32 },
-  low: { color: C.danger, fontWeight: '700' },
-  chargeBox: { backgroundColor: '#eef7f4', borderRadius: 10, padding: 10, gap: 4 },
-  chargeTitle: { color: C.fg, fontWeight: '700', fontSize: 15 },
-  chargeBtn: { backgroundColor: '#1f6fb2', borderColor: '#1f6fb2', flex: 0 },
+    gap: 8, paddingHorizontal: 16, paddingTop: 14, borderTopLeftRadius: 26, borderTopRightRadius: 26, ...shadow },
+  navEta: { color: C.accent, fontSize: 26, fontWeight: '800', fontVariant: ['tabular-nums'] },
+  navSub: { color: C.fg, fontSize: 14, fontWeight: '600' },
+  navBatt: { color: C.muted, fontSize: 12 },
+  iconBtn: { width: 46, height: 46, borderRadius: 23, alignItems: 'center', justifyContent: 'center', backgroundColor: C.surface },
+
+  busy: { position: 'absolute', alignSelf: 'center', flexDirection: 'row', gap: 10, alignItems: 'center', backgroundColor: C.bg, borderRadius: 20,
+    paddingHorizontal: 16, paddingVertical: 10, ...shadow },
+  toast: { position: 'absolute', alignSelf: 'center', backgroundColor: 'rgba(18,26,24,0.92)', borderRadius: 20, paddingHorizontal: 18, paddingVertical: 11, maxWidth: '90%' },
+  toastText: { color: '#fff', textAlign: 'center', fontSize: 15 },
 });
