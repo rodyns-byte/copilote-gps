@@ -38,7 +38,7 @@ jobs:
           CI: 1
       - name: Construire l'APK
         working-directory: android
-        run: ./gradlew assembleRelease --no-daemon -PreactNativeArchitectures=arm64-v8a,armeabi-v7a
+        run: ./gradlew assembleRelease --no-daemon -PreactNativeArchitectures=arm64-v8a
       - run: cp android/app/build/outputs/apk/release/app-release.apk copilote-gps-test.apk
       - uses: actions/upload-artifact@v4
         with:
